@@ -1,0 +1,5 @@
+[package]
+name = "pattern-matcher"
+version = "0.1.0"
+authors = ["Pete Hayes <pete@hayes.id.au>"]
+edition = "2018"

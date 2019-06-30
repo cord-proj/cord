@@ -1,0 +1,17 @@
+[package]
+name = "server"
+version = "0.1.0"
+authors = ["Pete Hayes <pete@hayes.id.au>"]
+edition = "2018"
+
+[dependencies]
+byteorder = "1.3"
+bytes = "0.4"
+clap = "2.33"
+error-chain = "0.12"
+futures = "0.1"
+futures-locks = "0.3"
+pattern-matcher = { version = "0.1", path = "../pattern-matcher" }
+tokio = "0.1"
+tokio-codec = "0.1"
+uuid = { version = "0.7", features = ["v4"] }
