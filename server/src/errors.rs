@@ -10,11 +10,6 @@ error_chain! {
     }
 
     errors {
-        BufferFull {
-            description("Cannot write buffer; it is full unexpectedly")
-            display("Cannot write buffer; it is full unexpectedly")
-        }
-
         OversizedData {
             description("Data length cannot be greater than a u32")
             display("Data length cannot be greater than a u32")

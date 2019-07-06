@@ -1,17 +1,46 @@
 use crate::errors::*;
-use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{buf::BufMut, BytesMut};
 use error_chain::bail;
 use pattern_matcher::Pattern;
 use tokio_codec::{Decoder, Encoder};
 
 use std::{
-    fmt::Write,
+    convert::TryInto,
     hash::{Hash, Hasher},
     mem,
     result::Result as StdResult,
-    u16, u32,
+    u16, u32, u8,
 };
+
+macro_rules! read_int_frame {
+    ($src:expr, $assign_to:expr, $type:ty) => {
+        if $assign_to.is_none() {
+            let len = mem::size_of::<$type>();
+
+            // Check we have adequate data in the buffer before proceeding
+            if $src.len() < len {
+                return Ok(None);
+            }
+
+            $assign_to = Some(<$type>::from_be_bytes(
+                (*$src.split_to(len)).try_into().unwrap(),
+            ));
+        }
+    };
+}
+
+macro_rules! read_str_frame {
+    ($src:expr, $assign_to:expr, $len:expr) => {
+        if $assign_to.is_none() {
+            // Check we have adequate data in the buffer before proceeding
+            if $src.len() < $len {
+                return Ok(None);
+            }
+
+            $assign_to = Some(String::from_utf8_lossy(&$src.split_to($len)).into_owned());
+        }
+    };
+}
 
 macro_rules! unwrap_msg {
     ($variant:tt, $func_name:ident) => (
@@ -91,7 +120,7 @@ impl PartialEq for Message {
                 Message::Event(pattern1, _) => pattern == pattern1,
                 _ => false,
             },
-            _ => self == other,
+            _ => self.namespace() == other.namespace(),
         }
     }
 }
@@ -111,11 +140,13 @@ impl Hash for Message {
     }
 }
 
+#[derive(Debug)]
 pub struct MessageCodec {
     discriminant: Option<u8>,
-    ns_length: Option<usize>,
+    ns_length: Option<u16>,
     namespace: Option<String>,
-    data_length: Option<usize>,
+    data_length: Option<u32>,
+    data: Option<String>,
 }
 
 impl MessageCodec {
@@ -125,6 +156,7 @@ impl MessageCodec {
             ns_length: None,
             namespace: None,
             data_length: None,
+            data: None,
         }
     }
 }
@@ -138,7 +170,7 @@ impl Encoder for MessageCodec {
 
     fn encode(&mut self, message: Self::Item, dst: &mut BytesMut) -> StdResult<(), Self::Error> {
         // Ensure the namespace will fit into a u16 buffer
-        if message.namespace().len() <= u16::MAX as usize {
+        if message.namespace().len() > u16::MAX as usize {
             bail!(ErrorKind::OversizedNamespace);
         }
 
@@ -147,18 +179,17 @@ impl Encoder for MessageCodec {
 
         // Write namespace bytes to buffer
         dst.put_u16_be(message.namespace().len() as u16);
-        dst.write_str(&message.namespace())
-            .chain_err(|| ErrorKind::BufferFull)?;
+        dst.extend_from_slice(message.namespace().as_bytes());
 
         if let Message::Event(_, data) = message {
             // Ensure the message data will fit into a u32 buffer
-            if data.len() <= u32::MAX as usize {
+            if data.len() > u32::MAX as usize {
                 bail!(ErrorKind::OversizedData);
             }
 
             // Write data bytes to buffer
             dst.put_u32_be(data.len() as u32);
-            dst.write_str(&data).chain_err(|| ErrorKind::BufferFull)?;
+            dst.extend_from_slice(data.as_bytes());
         }
 
         Ok(())
@@ -170,36 +201,11 @@ impl Decoder for MessageCodec {
     type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> StdResult<Option<Self::Item>, Self::Error> {
-        // Check we have adequate data in the buffer before proceeding
-        if src.len() < mem::size_of::<u8>() {
-            return Ok(None);
-        }
-
         // Read the discriminant (the type of message we're receiving)
-        let discriminant = match self.discriminant {
-            Some(d) => d,
-            None => u8::from_be_bytes([src.split_to(mem::size_of::<u8>())[0]]),
-        };
+        read_int_frame!(src, self.discriminant, u8);
 
-        // Check we have adequate data in the buffer before proceeding
-        if src.len() < mem::size_of::<u16>() {
-            // Store discriminant so we don't try and read it again
-            self.discriminant = Some(discriminant);
-            return Ok(None);
-        }
-
-        let ns_length = match self.ns_length {
-            Some(l) => l,
-            None => NetworkEndian::read_u16(&src.split_to(mem::size_of::<u16>())) as usize,
-        };
-
-        // If we don't have the full message yet, wait for the buffer to fill
-        // up more.
-        if src.len() < ns_length {
-            // Store this length so that we don't try and read it again next time
-            self.ns_length = Some(ns_length);
-            return Ok(None);
-        }
+        // Read the namespace's length
+        read_int_frame!(src, self.ns_length, u16);
 
         // Read the namespace
         // If the namespace contains non-UTF8 bytes, replace them with
@@ -207,135 +213,222 @@ impl Decoder for MessageCodec {
         // bad data. In future it may be better to reject non-UTF8 encoded messages
         // entirely, but will require returning Option<Message> or similar to avoid
         // terminating the stream altogether by returning an error.
-        let ns_bytes = src.split_to(ns_length);
-        let namespace = String::from_utf8_lossy(&ns_bytes);
+        read_str_frame!(
+            src,
+            self.namespace,
+            *self.ns_length.as_ref().unwrap() as usize
+        );
 
-        // Check we have adequate data in the buffer before proceeding
-        if src.len() < mem::size_of::<u32>() {
-            // Store namespace so we don't try and read it again
-            self.namespace = Some(namespace.into_owned());
-            return Ok(None);
+        // The magic number "4" represents the discriminant value for Message::Event. If
+        // we are receiving a Message::Event, there is an extra data component to read.
+        if *self.discriminant.as_ref().unwrap() == 4 {
+            // Read the data's length
+            read_int_frame!(src, self.data_length, u32);
+
+            // Read the data
+            read_str_frame!(src, self.data, *self.data_length.as_ref().unwrap() as usize);
         }
 
-        // The magic number "4" represents the discriminant value for
-        // Message::Event. If we are receiving a Message::Event, there is an
-        // extra data component to read.
-        let data = if discriminant == 4 {
-            let data_length = match self.data_length {
-                Some(l) => l,
-                None => NetworkEndian::read_u32(&src.split_to(mem::size_of::<u32>())) as usize,
-            };
-
-            // If we don't have the full message yet, wait for the buffer to fill
-            // up more.
-            if src.len() < data_length {
-                // Store this length so that we don't try and read it again next time
-                self.data_length = Some(data_length);
-                return Ok(None);
-            }
-
-            // Read the message data
-            let data_bytes = src.split_to(data_length);
-            Some(String::from_utf8_lossy(&data_bytes).into_owned())
-        } else {
-            None
-        };
+        // Reset these values in preparation for the next message
+        self.ns_length = None;
+        self.data_length = None;
 
         Ok(Some(Message::from_poor_mans_discriminant(
-            discriminant,
-            namespace.into(),
-            data,
+            self.discriminant.take().unwrap(),
+            self.namespace.take().unwrap().into(),
+            self.data.take(),
         )))
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use bytes::Bytes;
-//
-//     #[test]
-//     fn test_message_new_ok() {
-//         assert!(Message::new("abc").is_ok());
-//     }
-//
-//     #[test]
-//     fn test_message_new_oversize() {
-//         let long_str = String::from_utf8(vec![0; 65536]).unwrap();
-//         let e = Message::new(long_str).unwrap_err();
-//         match e.kind() {
-//             ErrorKind::OversizedNamespace => (),
-//             _ => panic!("Expected variant ErrorKind::OversizedNamespace"),
-//         }
-//     }
-//
-//     #[test]
-//     fn test_encode_ok() {
-//         let msg = Message {
-//             namespace: "/my/namespace".into(),
-//         };
-//         let mut bytes = BytesMut::new();
-//         let mut encoder = MessageCodec::new();
-//         encoder
-//             .encode(msg, &mut bytes)
-//             .expect("Failed to encode message");
-//         assert_eq!(bytes, Bytes::from("\0\r/my/namespace"));
-//     }
-//
-//     #[test]
-//     #[should_panic(expected = "Namespace length cannot be greater than a u16")]
-//     fn test_encode_oversize() {
-//         // 65536 = u16::MAX + 1
-//         // Hence a 32 bit int
-//         let long_str = String::from_utf8(vec![0; 65536]).unwrap();
-//         let msg = Message {
-//             namespace: long_str,
-//         };
-//         let mut bytes = BytesMut::new();
-//         let mut encoder = MessageCodec::new();
-//         encoder
-//             .encode(msg, &mut bytes)
-//             .expect("Failed to encode message");
-//     }
-//
-//     #[test]
-//     fn test_decode() {
-//         let mut bytes = BytesMut::from("\0\r/my/namespace");
-//         let mut decoder = MessageCodec::new();
-//         let msg = decoder
-//             .decode(&mut bytes)
-//             .expect("Failed to decode message");
-//         assert_eq!(
-//             msg,
-//             Some(Message {
-//                 namespace: "/my/namespace".into()
-//             })
-//         );
-//     }
-//
-//     #[test]
-//     fn test_decode_partial() {
-//         let mut bytes = BytesMut::from("\0\r/my/name");
-//         let mut decoder = MessageCodec::new();
-//
-//         // Test decoding a partial message
-//         let response = decoder
-//             .decode(&mut bytes)
-//             .expect("Failed to decode message");
-//         assert!(response.is_none());
-//
-//         // Test decoding the rest of the message
-//         bytes
-//             .write_str("space")
-//             .expect("Failed to write bytes to buffer");
-//         let msg = decoder
-//             .decode(&mut bytes)
-//             .expect("Failed to decode message");
-//         assert_eq!(
-//             msg,
-//             Some(Message {
-//                 namespace: "/my/namespace".into()
-//             })
-//         )
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn test_encode_nodata_ok() {
+        let msg = Message::Provide("/my/namespace".into());
+        let mut bytes = BytesMut::new();
+        let mut encoder = MessageCodec::new();
+        encoder
+            .encode(msg, &mut bytes)
+            .expect("Failed to encode message");
+        assert_eq!(bytes, Bytes::from("\0\0\r/my/namespace"));
+    }
+
+    #[test]
+    fn test_encode_event_ok() {
+        let msg = Message::Event("/my/namespace".into(), "abc, easy as 123".into());
+        let mut bytes = BytesMut::new();
+        let mut encoder = MessageCodec::new();
+        encoder
+            .encode(msg, &mut bytes)
+            .expect("Failed to encode message");
+        assert_eq!(
+            bytes,
+            Bytes::from("\x04\0\r/my/namespace\0\0\0\x10abc, easy as 123")
+        );
+    }
+
+    #[test]
+    fn test_encode_oversized_namespace() {
+        #[allow(clippy::cast_lossless)]
+        let long_str = String::from_utf8(vec![0; (u16::MAX as u32 + 1) as usize]).unwrap();
+        let msg = Message::Unsubscribe(long_str.into());
+        let mut bytes = BytesMut::new();
+        let mut encoder = MessageCodec::new();
+        match encoder
+            .encode(msg, &mut bytes)
+            .err()
+            .expect("Test passed unexpectedly")
+            .kind()
+        {
+            ErrorKind::OversizedNamespace => (),
+            _ => panic!("Test passed unexpectedly"),
+        }
+    }
+
+    #[test]
+    fn test_encode_oversized_data() {
+        // XXX Creating a String this large is very very very slow! In future this should
+        // be mocked somehow.
+        #[allow(clippy::cast_lossless)]
+        let long_str = String::from_utf8(vec![0; (u32::MAX as u64 + 1) as usize]).unwrap();
+        let msg = Message::Event("/".into(), long_str);
+        let mut bytes = BytesMut::new();
+        let mut encoder = MessageCodec::new();
+        match encoder
+            .encode(msg, &mut bytes)
+            .err()
+            .expect("Test passed unexpectedly")
+            .kind()
+        {
+            ErrorKind::OversizedData => (),
+            _ => panic!("Test passed unexpectedly"),
+        }
+    }
+
+    #[test]
+    fn test_decode_ok() {
+        let mut bytes = BytesMut::from("\x01\0\r/my/namespace");
+        let mut decoder = MessageCodec::new();
+        let msg = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert_eq!(msg, Some(Message::Revoke("/my/namespace".into())));
+    }
+
+    #[test]
+    fn test_decode_partial() {
+        let mut bytes = BytesMut::new();
+        let mut decoder = MessageCodec::new();
+
+        // Test decoding nothing
+        dbg!("Decode nada");
+        let response = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert!(response.is_none());
+
+        // Test decoding the discriminant
+        dbg!("Decode discriminant");
+        bytes.put_u8(Message::Event("/".into(), String::new()).poor_mans_discriminant());
+        let response = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert!(response.is_none());
+
+        // Test decoding partial namespace
+        dbg!("Decode partial name");
+        bytes.put_u16_be(13);
+        bytes.extend_from_slice(b"/my/name");
+        let response = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert!(response.is_none());
+
+        // Test decoding the rest of the namespace
+        dbg!("Decode name");
+        bytes.extend_from_slice(b"space");
+        let response = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert!(response.is_none());
+
+        // Test decoding partial data
+        dbg!("Decode partial data");
+        bytes.put_u32_be(5);
+        bytes.extend_from_slice(b"a");
+        let response = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert!(response.is_none());
+
+        // Test decoding the rest of the data
+        dbg!("Decode data");
+        bytes.extend_from_slice(b"bcde");
+        let msg = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert_eq!(
+            msg,
+            Some(Message::Event("/my/namespace".into(), "abcde".into()))
+        );
+    }
+
+    #[test]
+    fn test_poor_mans_discriminant() {
+        let pattern = Pattern::new("/");
+
+        let provide = Message::Provide(pattern.clone());
+        assert_eq!(
+            Message::from_poor_mans_discriminant(
+                provide.poor_mans_discriminant(),
+                pattern.clone(),
+                None
+            ),
+            provide
+        );
+
+        let revoke = Message::Revoke(pattern.clone());
+        assert_eq!(
+            Message::from_poor_mans_discriminant(
+                revoke.poor_mans_discriminant(),
+                pattern.clone(),
+                None
+            ),
+            revoke
+        );
+
+        let subscribe = Message::Subscribe(pattern.clone());
+        assert_eq!(
+            Message::from_poor_mans_discriminant(
+                subscribe.poor_mans_discriminant(),
+                pattern.clone(),
+                None
+            ),
+            subscribe
+        );
+
+        let unsubscribe = Message::Unsubscribe(pattern.clone());
+        assert_eq!(
+            Message::from_poor_mans_discriminant(
+                unsubscribe.poor_mans_discriminant(),
+                pattern.clone(),
+                None
+            ),
+            unsubscribe
+        );
+
+        let event = Message::Event(pattern.clone(), String::new());
+        assert_eq!(
+            Message::from_poor_mans_discriminant(
+                event.poor_mans_discriminant(),
+                pattern.clone(),
+                Some(String::new())
+            ),
+            event
+        );
+    }
+}
