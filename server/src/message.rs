@@ -1,12 +1,14 @@
+use crate::errors::*;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{buf::BufMut, BytesMut};
+use error_chain::bail;
 use pattern_matcher::Pattern;
 use tokio_codec::{Decoder, Encoder};
 
 use std::{
     fmt::Write,
     hash::{Hash, Hasher},
-    io, mem,
+    mem,
     result::Result as StdResult,
     u16, u32,
 };
@@ -42,7 +44,10 @@ impl Message {
             1 => Message::Revoke(namespace),
             2 => Message::Subscribe(namespace),
             3 => Message::Unsubscribe(namespace),
-            4 => Message::Event(namespace, data.unwrap()),
+            4 => Message::Event(
+                namespace,
+                data.expect("Data must be present for Message::Event type"),
+            ),
             _ => panic!("Invalid discriminant {}", discriminant),
         }
     }
@@ -124,34 +129,36 @@ impl MessageCodec {
     }
 }
 
+// Message framing on the wire looks like:
+//      [u8             ][u16      ][bytestr  ][u32        ][bytestr]
+//      [ns_discriminant][ns_length][namespace][data_length][data   ]
 impl Encoder for MessageCodec {
     type Item = Message;
-    type Error = io::Error;
+    type Error = Error;
 
     fn encode(&mut self, message: Self::Item, dst: &mut BytesMut) -> StdResult<(), Self::Error> {
         // Ensure the namespace will fit into a u16 buffer
-        assert!(
-            message.namespace().len() <= u16::MAX as usize,
-            "Namespace length cannot be greater than a u16"
-        );
+        if message.namespace().len() <= u16::MAX as usize {
+            bail!(ErrorKind::OversizedNamespace);
+        }
 
         // Write the message type to buffer
         dst.put_u8(message.poor_mans_discriminant());
 
         // Write namespace bytes to buffer
         dst.put_u16_be(message.namespace().len() as u16);
-        dst.write_str(&message.namespace()).unwrap();
+        dst.write_str(&message.namespace())
+            .chain_err(|| ErrorKind::BufferFull)?;
 
         if let Message::Event(_, data) = message {
             // Ensure the message data will fit into a u32 buffer
-            assert!(
-                data.len() <= u32::MAX as usize,
-                "Data length cannot be greater than a u32"
-            );
+            if data.len() <= u32::MAX as usize {
+                bail!(ErrorKind::OversizedData);
+            }
 
             // Write data bytes to buffer
             dst.put_u32_be(data.len() as u32);
-            dst.write_str(&data).unwrap();
+            dst.write_str(&data).chain_err(|| ErrorKind::BufferFull)?;
         }
 
         Ok(())
@@ -160,7 +167,7 @@ impl Encoder for MessageCodec {
 
 impl Decoder for MessageCodec {
     type Item = Message;
-    type Error = io::Error;
+    type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> StdResult<Option<Self::Item>, Self::Error> {
         // Check we have adequate data in the buffer before proceeding
@@ -195,12 +202,18 @@ impl Decoder for MessageCodec {
         }
 
         // Read the namespace
-        let namespace = String::from_utf8(src.split_to(ns_length).to_vec()).unwrap();
+        // If the namespace contains non-UTF8 bytes, replace them with
+        // U+FFFD REPLACEMENT CHARACTER. This allows the decoding to continue despite the
+        // bad data. In future it may be better to reject non-UTF8 encoded messages
+        // entirely, but will require returning Option<Message> or similar to avoid
+        // terminating the stream altogether by returning an error.
+        let ns_bytes = src.split_to(ns_length);
+        let namespace = String::from_utf8_lossy(&ns_bytes);
 
         // Check we have adequate data in the buffer before proceeding
         if src.len() < mem::size_of::<u32>() {
             // Store namespace so we don't try and read it again
-            self.namespace = Some(namespace);
+            self.namespace = Some(namespace.into_owned());
             return Ok(None);
         }
 
@@ -222,7 +235,8 @@ impl Decoder for MessageCodec {
             }
 
             // Read the message data
-            Some(String::from_utf8(src.split_to(data_length).to_vec()).unwrap())
+            let data_bytes = src.split_to(data_length);
+            Some(String::from_utf8_lossy(&data_bytes).into_owned())
         } else {
             None
         };

@@ -1,4 +1,7 @@
-use crate::message::{Message, MessageCodec};
+use crate::{
+    errors::{Error, ErrorKind},
+    message::{Message, MessageCodec},
+};
 use futures::{self, future, Future, Stream};
 use futures_locks::Mutex;
 use pattern_matcher::Pattern;
@@ -11,7 +14,7 @@ use uuid::Uuid;
 
 use std::{
     collections::{hash_map::Entry, HashMap},
-    io, mem,
+    mem,
 };
 
 #[derive(Clone)]
@@ -236,7 +239,7 @@ pub fn new(socket: TcpStream) -> PublisherHandle {
     // Spawn task to drain channel receiver into socket sink
     tokio::spawn(
         consumer_rx
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(|e| Error::from_kind(ErrorKind::ChanRecv(e)))
             .forward(sink)
             .map(|_| ())
             .map_err(|_| ()),

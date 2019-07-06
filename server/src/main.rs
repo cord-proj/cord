@@ -36,7 +36,9 @@ fn main() -> Result<()> {
     // Bind the server's socket
     let addr = format!(
         "{}:{}",
+        // This unwrap is safe as a default value will always be available
         matches.value_of("bind").unwrap(),
+        // This unwrap is safe as a default value will always be available
         matches.value_of("port").unwrap()
     )
     .parse()
