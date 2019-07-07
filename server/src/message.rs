@@ -4,13 +4,7 @@ use error_chain::bail;
 use pattern_matcher::Pattern;
 use tokio_codec::{Decoder, Encoder};
 
-use std::{
-    convert::TryInto,
-    hash::{Hash, Hasher},
-    mem,
-    result::Result as StdResult,
-    u16, u32, u8,
-};
+use std::{convert::TryInto, mem, result::Result as StdResult, u16, u32, u8};
 
 macro_rules! read_int_frame {
     ($src:expr, $assign_to:expr, $type:ty) => {
@@ -53,7 +47,7 @@ macro_rules! unwrap_msg {
     )
 }
 
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Message {
     Provide(Pattern),
     Revoke(Pattern),
@@ -63,6 +57,18 @@ pub enum Message {
 }
 
 impl Message {
+    // Check that the discriminant is in range. The magic number "4" is the maximum
+    // integer assigned to a Message variant. See `poor_mans_discriminant()` for details.
+    // Note that we take a ref u8 instead of an owned u8 to be compatible with
+    // `Option::filter`, which passes all args by ref.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn test_poor_mans_discriminant(discriminant: &u8) -> bool {
+        *discriminant <= 4
+    }
+
+    // This function takes a discriminant and all other data necessary to instantiate a
+    // new Message variant. To avoid panics, first check the discriminant with
+    // `test_poor_mans_discriminant()`.
     pub fn from_poor_mans_discriminant(
         discriminant: u8,
         namespace: Pattern,
@@ -81,11 +87,14 @@ impl Message {
         }
     }
 
+    // These macro-generated functions will destructure the Message enum, returning an
+    // owned Pattern.
     unwrap_msg!(Provide, unwrap_provide);
     unwrap_msg!(Revoke, unwrap_revoke);
     unwrap_msg!(Subscribe, unwrap_subscribe);
     unwrap_msg!(Unsubscribe, unwrap_unsubscribe);
 
+    // Return the namespace pattern for any variant
     pub fn namespace(&self) -> &Pattern {
         match self {
             Message::Provide(p) => p,
@@ -96,8 +105,11 @@ impl Message {
         }
     }
 
-    // Unfortunately Rust doesn't provide a way to access the underlying
-    // discriminant value. Thus we have to invent our own. Lame!
+    // Unfortunately Rust doesn't provide a way to access the underlying discriminant
+    // value. Thus we have to invent our own. Lame!
+    //
+    // The fn name is going to stay horrible until a better solution is found. Don't want
+    // to get comfortable with this hack :)
     // https://github.com/rust-lang/rust/issues/34244
     pub fn poor_mans_discriminant(&self) -> u8 {
         match self {
@@ -106,36 +118,6 @@ impl Message {
             Message::Subscribe(_) => 2,
             Message::Unsubscribe(_) => 3,
             Message::Event(_, _) => 4,
-        }
-    }
-}
-
-// Messages are only required to match on their Pattern. `Message::Event`
-// contains a string argument, though we can safely ignore it, which requires
-// a custom implementation of `PartialEq`.
-impl PartialEq for Message {
-    fn eq(&self, other: &Self) -> bool {
-        match self {
-            Message::Event(pattern, _) => match other {
-                Message::Event(pattern1, _) => pattern == pattern1,
-                _ => false,
-            },
-            _ => self.namespace() == other.namespace(),
-        }
-    }
-}
-
-impl Hash for Message {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Message::Provide(p) => p.hash(state),
-            Message::Revoke(p) => p.hash(state),
-            Message::Subscribe(p) => p.hash(state),
-            Message::Unsubscribe(p) => p.hash(state),
-            Message::Event(p, s) => {
-                p.hash(state);
-                s.hash(state);
-            }
         }
     }
 }
@@ -203,6 +185,16 @@ impl Decoder for MessageCodec {
     fn decode(&mut self, src: &mut BytesMut) -> StdResult<Option<Self::Item>, Self::Error> {
         // Read the discriminant (the type of message we're receiving)
         read_int_frame!(src, self.discriminant, u8);
+
+        // Check that the discriminant is valid
+        self.discriminant = self
+            .discriminant
+            .filter(Message::test_poor_mans_discriminant);
+
+        if self.discriminant.is_none() {
+            // XXX The message is buggered...we should handle this!
+            panic!("This message is buggered");
+        }
 
         // Read the namespace's length
         read_int_frame!(src, self.ns_length, u16);
@@ -325,14 +317,12 @@ mod tests {
         let mut decoder = MessageCodec::new();
 
         // Test decoding nothing
-        dbg!("Decode nada");
         let response = decoder
             .decode(&mut bytes)
             .expect("Failed to decode message");
         assert!(response.is_none());
 
         // Test decoding the discriminant
-        dbg!("Decode discriminant");
         bytes.put_u8(Message::Event("/".into(), String::new()).poor_mans_discriminant());
         let response = decoder
             .decode(&mut bytes)
@@ -340,7 +330,6 @@ mod tests {
         assert!(response.is_none());
 
         // Test decoding partial namespace
-        dbg!("Decode partial name");
         bytes.put_u16_be(13);
         bytes.extend_from_slice(b"/my/name");
         let response = decoder
@@ -349,7 +338,6 @@ mod tests {
         assert!(response.is_none());
 
         // Test decoding the rest of the namespace
-        dbg!("Decode name");
         bytes.extend_from_slice(b"space");
         let response = decoder
             .decode(&mut bytes)
@@ -357,7 +345,6 @@ mod tests {
         assert!(response.is_none());
 
         // Test decoding partial data
-        dbg!("Decode partial data");
         bytes.put_u32_be(5);
         bytes.extend_from_slice(b"a");
         let response = decoder
@@ -366,7 +353,6 @@ mod tests {
         assert!(response.is_none());
 
         // Test decoding the rest of the data
-        dbg!("Decode data");
         bytes.extend_from_slice(b"bcde");
         let msg = decoder
             .decode(&mut bytes)
@@ -430,5 +416,26 @@ mod tests {
             ),
             event
         );
+    }
+
+    #[test]
+    fn test_decode_multiple() {
+        let mut decoder = MessageCodec::new();
+
+        let mut bytes = BytesMut::from("\x01\0\r/my/namespace");
+        let msg = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert_eq!(msg, Some(Message::Revoke("/my/namespace".into())));
+
+        bytes.put_u8(4);
+        bytes.put_u16_be(4);
+        bytes.extend_from_slice(b"/moo");
+        bytes.put_u32_be(3);
+        bytes.extend_from_slice(b"cow");
+        let msg = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert_eq!(msg, Some(Message::Event("/moo".into(), "cow".into())));
     }
 }
