@@ -16,6 +16,8 @@ macro_rules! read_int_frame {
                 return Ok(None);
             }
 
+            // Using `unwrap()` here should be safe as the buffer is first resized to the
+            // length of the array.
             $assign_to = Some(<$type>::from_be_bytes(
                 (*$src.split_to(len)).try_into().unwrap(),
             ));
@@ -31,6 +33,11 @@ macro_rules! read_str_frame {
                 return Ok(None);
             }
 
+            // If the namespace contains non-UTF8 bytes, replace them with
+            // U+FFFD REPLACEMENT CHARACTER. This allows the decoding to continue despite
+            // the bad data. In future it may be better to reject non-UTF8 encoded
+            // messages entirely, but will require returning Option<Message> or similar
+            // to avoid terminating the stream altogether by returning an error.
             $assign_to = Some(String::from_utf8_lossy(&$src.split_to($len)).into_owned());
         }
     };
@@ -192,19 +199,13 @@ impl Decoder for MessageCodec {
             .filter(Message::test_poor_mans_discriminant);
 
         if self.discriminant.is_none() {
-            // XXX The message is buggered...we should handle this!
-            panic!("This message is buggered");
+            bail!("Unknown Message discriminant");
         }
 
         // Read the namespace's length
         read_int_frame!(src, self.ns_length, u16);
 
         // Read the namespace
-        // If the namespace contains non-UTF8 bytes, replace them with
-        // U+FFFD REPLACEMENT CHARACTER. This allows the decoding to continue despite the
-        // bad data. In future it may be better to reject non-UTF8 encoded messages
-        // entirely, but will require returning Option<Message> or similar to avoid
-        // terminating the stream altogether by returning an error.
         read_str_frame!(
             src,
             self.namespace,
@@ -309,6 +310,16 @@ mod tests {
             .decode(&mut bytes)
             .expect("Failed to decode message");
         assert_eq!(msg, Some(Message::Revoke("/my/namespace".into())));
+    }
+
+    #[test]
+    fn test_decode_invalid_discriminant() {
+        let mut bytes = BytesMut::from("\x09");
+        let mut decoder = MessageCodec::new();
+        match decoder.decode(&mut bytes) {
+            Ok(_) => panic!("Failed to detect invalid Message discriminant"),
+            Err(e) => assert_eq!(e.description(), "Unknown Message discriminant"),
+        }
     }
 
     #[test]
