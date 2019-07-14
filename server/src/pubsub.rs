@@ -202,7 +202,7 @@ impl PublisherHandle {
             .with(move |mut guard| {
                 (*guard).retain(|k, _| {
                     mem::discriminant(k) != mem::discriminant(&message)
-                        || k.namespace() > message.namespace()
+                        || !message.namespace().contains(&k.namespace())
                 });
                 future::ok(())
             })
@@ -261,7 +261,7 @@ pub fn new(socket: TcpStream) -> PublisherHandle {
                         // `subs` map. This leaves us with an empty map that should also
                         // be tidied up, hence the use of retain() here.
                         (*guard).retain(|sub_msg, subs| {
-                            if sub_msg.namespace() >= message.namespace() {
+                            if sub_msg.namespace().contains(&message.namespace()) {
                                 // We use retain() here, which allows us to cleanup any
                                 // subscribers that have OnetimeTask's or whose channels
                                 // have been closed.

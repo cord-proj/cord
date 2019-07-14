@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, convert::From, ops::Deref};
+use std::{convert::From, ops::Deref};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Pattern(String);
@@ -7,26 +7,14 @@ impl Pattern {
     pub fn new<S: Into<String>>(pattern: S) -> Self {
         Pattern(pattern.into())
     }
-}
 
-impl PartialOrd for Pattern {
-    fn partial_cmp(&self, other: &Pattern) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Pattern {
     // The most generic namespace has the greatest value
-    fn cmp(&self, other: &Pattern) -> Ordering {
+    pub fn contains(&self, other: &Pattern) -> bool {
         if self == other {
-            Ordering::Equal
-        }
-        // E.g. /a > /a/b
-        else if other.0.starts_with(&self.0) && other.0.chars().nth(self.0.len()) == Some('/') {
-            Ordering::Greater
-        // E.g. /a/b < /a
+            true
         } else {
-            Ordering::Less
+            // E.g. /a contains /a/b
+            other.0.starts_with(&self.0) && other.0.chars().nth(self.0.len()) == Some('/')
         }
     }
 }
@@ -59,16 +47,16 @@ mod tests {
 
     #[test]
     fn test_ord_unequal() {
-        assert!(Pattern::new("/a/b") < Pattern::new("/ab"))
+        assert!(!Pattern::new("/a/b").contains(&Pattern::new("/ab")))
     }
 
     #[test]
     fn test_ord_greater() {
-        assert!(Pattern::new("/a") > Pattern::new("/a/b"))
+        assert!(Pattern::new("/a").contains(&Pattern::new("/a/b")))
     }
 
     #[test]
     fn test_ord_less() {
-        assert!(Pattern::new("/a/b") < Pattern::new("/a"))
+        assert!(!Pattern::new("/a/b").contains(&Pattern::new("/a")))
     }
 }
