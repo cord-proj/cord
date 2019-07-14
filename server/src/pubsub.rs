@@ -286,10 +286,66 @@ mod tests {
     use super::*;
     use futures::future;
     use futures_locks::Mutex;
-    use tokio::sync::{mpsc, oneshot};
+    use lazy_static::lazy_static;
+    use tokio::{
+        runtime::Runtime,
+        sync::{mpsc, oneshot},
+    };
+
+    use std::sync::Mutex as StdMutex;
+
+    lazy_static! {
+        static ref RUNTIME: StdMutex<TokioRuntime> = StdMutex::new(TokioRuntime::new());
+    }
+
+    // Because each test requires a Tokio runtime, the test pack can exhaust the kernel's
+    // file limit. To mitigate this issue, we use a shared runtime to limit the number of
+    // open file descriptors.
+    struct TokioRuntime {
+        runtime: Option<Runtime>,
+        users: u16,
+    }
+
+    impl TokioRuntime {
+        pub fn new() -> TokioRuntime {
+            TokioRuntime {
+                runtime: None,
+                users: 0,
+            }
+        }
+
+        pub fn start(&mut self) {
+            if self.runtime.is_none() {
+                self.runtime = Some(Runtime::new().unwrap());
+            }
+            self.users += 1;
+        }
+
+        pub fn stop(&mut self) {
+            self.users -= 1;
+
+            if self.users == 0 && self.runtime.is_some() {
+                self.runtime
+                    .take()
+                    .unwrap()
+                    .shutdown_on_idle()
+                    .wait()
+                    .unwrap();
+            }
+        }
+
+        pub fn block_on<F>(&mut self, future: F)
+        where
+            F: Send + 'static + Future<Item = (), Error = ()>,
+        {
+            self.runtime.as_mut().unwrap().block_on(future).unwrap();
+        }
+    }
 
     #[test]
     fn test_subscribe() {
+        RUNTIME.lock().unwrap().start();
+
         let (tx, _) = mpsc::unbounded_channel();
         let subscribers = Mutex::new(HashMap::new());
         let message = Message::Provide("/a".into());
@@ -302,7 +358,7 @@ mod tests {
         // All this extra fluff around future::lazy() is necessary to ensure that there
         // is an active executor when subscribe() calls Mutex::with().
         let (tx, mut rx) = oneshot::channel();
-        tokio::run(future::lazy(move || {
+        RUNTIME.lock().unwrap().block_on(future::lazy(move || {
             let (id, fut) = handle.subscribe(
                 message_c,
                 Subscriber::Task(Box::new(|_| Box::new(future::ok(())))),
@@ -315,10 +371,14 @@ mod tests {
             Ok(subs) => assert!(subs[&message].contains_key(&rx.try_recv().unwrap())),
             _ => unreachable!(),
         }
+
+        RUNTIME.lock().unwrap().stop();
     }
 
     #[test]
     fn test_unsubscribe_single() {
+        RUNTIME.lock().unwrap().start();
+
         let (tx, _) = mpsc::unbounded_channel();
 
         let mut subs = HashMap::new();
@@ -337,16 +397,23 @@ mod tests {
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
         // is an active executor when subscribe() calls Mutex::with().
-        tokio::run(future::lazy(move || handle.unsubscribe(message, uuid)));
+        RUNTIME
+            .lock()
+            .unwrap()
+            .block_on(future::lazy(move || handle.unsubscribe(message, uuid)));
 
         match subscribers.try_unwrap() {
             Ok(subs) => assert!(!subs.contains_key(&message_c)),
             _ => unreachable!(),
         }
+
+        RUNTIME.lock().unwrap().stop();
     }
 
     #[test]
     fn test_unsubscribe_multiple() {
+        RUNTIME.lock().unwrap().start();
+
         let (tx, _) = mpsc::unbounded_channel();
 
         let mut subs = HashMap::new();
@@ -366,7 +433,10 @@ mod tests {
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
         // is an active executor when subscribe() calls Mutex::with().
-        tokio::run(future::lazy(move || handle.unsubscribe(message, uuid1)));
+        RUNTIME
+            .lock()
+            .unwrap()
+            .block_on(future::lazy(move || handle.unsubscribe(message, uuid1)));
 
         match subscribers.try_unwrap() {
             Ok(subs) => {
@@ -376,10 +446,14 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        RUNTIME.lock().unwrap().stop();
     }
 
     #[test]
     fn test_unsubscribe_children() {
+        RUNTIME.lock().unwrap().start();
+
         let (tx, _) = mpsc::unbounded_channel();
 
         let mut subs = HashMap::new();
@@ -409,7 +483,7 @@ mod tests {
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
         // is an active executor when subscribe() calls Mutex::with().
-        tokio::run(future::lazy(move || {
+        RUNTIME.lock().unwrap().block_on(future::lazy(move || {
             handle.unsubscribe_children(Message::Provide("/a".into()))
         }));
 
@@ -422,6 +496,76 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        RUNTIME.lock().unwrap().stop();
+    }
+
+    #[test]
+    fn test_subscriber_recv_consumer() {
+        RUNTIME.lock().unwrap().start();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (txo, mut rxo) = oneshot::channel();
+        let message = Message::Event("/a".into(), "abc".into());
+        let message_c = message.clone();
+
+        let mut consumer = Subscriber::Consumer(tx);
+        assert!(consumer.recv(message));
+
+        RUNTIME.lock().unwrap().block_on(
+            rx.into_future()
+                .and_then(|(msg, _)| {
+                    txo.send(msg.unwrap()).unwrap();
+                    future::ok(())
+                })
+                .map_err(|_| ()),
+        );
+        assert_eq!(rxo.try_recv().unwrap(), message_c);
+
+        RUNTIME.lock().unwrap().stop();
+    }
+
+    #[test]
+    fn test_subscriber_recv_task() {
+        RUNTIME.lock().unwrap().start();
+
+        let (tx, mut rx) = oneshot::channel();
+        let mut tx = Some(tx);
+        let message = Message::Event("/a".into(), "abc".into());
+        let message_c = message.clone();
+
+        let mut consumer = Subscriber::Task(Box::new(move |msg| {
+            tx.take().unwrap().send(msg).unwrap();
+            Box::new(future::ok(()))
+        }));
+        RUNTIME.lock().unwrap().block_on(future::lazy(move || {
+            consumer.recv(message);
+            future::ok(())
+        }));
+        assert_eq!(rx.try_recv().unwrap(), message_c);
+
+        RUNTIME.lock().unwrap().stop();
+    }
+
+    #[test]
+    fn test_subscriber_recv_onetime_task() {
+        RUNTIME.lock().unwrap().start();
+
+        let (tx, mut rx) = oneshot::channel();
+        let message = Message::Event("/a".into(), "abc".into());
+        let message_c = message.clone();
+
+        let mut consumer = Subscriber::OnetimeTask(Some(Box::new(move |msg| {
+            tx.send(msg).unwrap();
+            Box::new(future::ok(()))
+        })));
+        RUNTIME.lock().unwrap().block_on(future::lazy(move || {
+            consumer.recv(message);
+            future::ok(())
+        }));
+        assert_eq!(rx.try_recv().unwrap(), message_c);
+
+        RUNTIME.lock().unwrap().stop();
     }
 
     fn add_message(

@@ -14,3 +14,6 @@ pattern-matcher = { version = "0.1", path = "../pattern-matcher" }
 tokio = "0.1"
 tokio-codec = "0.1"
 uuid = { version = "0.7", features = ["v4"] }
+
+[dev-dependencies]
+lazy_static = "1.3"
