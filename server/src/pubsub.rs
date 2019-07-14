@@ -17,6 +17,8 @@ use std::{
     mem,
 };
 
+type SomeFuture = Box<dyn Future<Item = (), Error = ()> + Send>;
+
 #[derive(Clone)]
 pub struct PublisherHandle {
     // This is a channel to the write half of our TcpStream
@@ -28,9 +30,9 @@ enum Subscriber {
     Consumer(UnboundedSender<Message>),
     // @todo Replace trait object with impl Trait once stabilised:
     // https://github.com/rust-lang/rust/issues/34511
-    Task(Box<FnMut(Message) -> Box<dyn Future<Item = (), Error = ()> + Send> + Send>),
     // Task(Box<FnMut(Message, PublisherHandle) -> impl Future<Item=(), Error=()>>)
-    OnetimeTask(Box<FnMut(Message) -> Box<dyn Future<Item = (), Error = ()> + Send> + Send>),
+    Task(Box<FnMut(Message) -> SomeFuture + Send>),
+    OnetimeTask(Option<Box<FnOnce(Message) -> SomeFuture + Send>>),
 }
 
 impl PublisherHandle {
@@ -108,9 +110,9 @@ impl PublisherHandle {
         // SUBSCRIBE messages to it.
         let (_, futr) = other_clone.subscribe(
             Message::Revoke(namespace_clone),
-            Subscriber::OnetimeTask(Box::new(move |message| {
+            Subscriber::OnetimeTask(Some(Box::new(move |message| {
                 Box::new(me.unsubscribe(Message::Subscribe(message.unwrap_revoke()), uuid))
-            })),
+            }))),
         );
 
         futs.join(futr).map(|_| ())
@@ -137,12 +139,12 @@ impl PublisherHandle {
         // below will trigger it.
         let (_, futu) = other.subscribe(
             Message::Unsubscribe(namespace_clone),
-            Subscriber::OnetimeTask(Box::new(move |message| {
+            Subscriber::OnetimeTask(Some(Box::new(move |message| {
                 Box::new(me.unsubscribe(
                     Message::Event(message.unwrap_unsubscribe(), String::new()),
                     uuid,
                 ))
-            })),
+            }))),
         );
 
         fute.join(futu).map(|_| ())
@@ -215,8 +217,10 @@ impl Subscriber {
                 tokio::spawn(f(message));
                 true // Retain subscriber in map
             }
-            Subscriber::OnetimeTask(f) => {
-                tokio::spawn(f(message));
+            Subscriber::OnetimeTask(opt) => {
+                if let Some(f) = opt.take() {
+                    tokio::spawn(f(message));
+                }
                 false // Don't retain subscriber in map
             }
         }
@@ -301,7 +305,7 @@ mod tests {
         tokio::run(future::lazy(move || {
             let (id, fut) = handle.subscribe(
                 message_c,
-                Subscriber::OnetimeTask(Box::new(|_| Box::new(future::ok(())))),
+                Subscriber::Task(Box::new(|_| Box::new(future::ok(())))),
             );
             tx.send(id).unwrap();
             fut
