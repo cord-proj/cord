@@ -283,6 +283,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_encode_oversized_data() {
         // XXX Creating a String this large is very very very slow! In future this should
         // be mocked somehow.
