@@ -171,16 +171,12 @@ impl PublisherHandle {
     }
 
     // Remove a Subscriber for a specific Message from our subscriber list
-    fn unsubscribe(
-        &self,
-        message: Message,
-        subscriber: Uuid,
-    ) -> impl Future<Item = (), Error = ()> {
+    fn unsubscribe(&self, message: Message, sub_id: Uuid) -> impl Future<Item = (), Error = ()> {
         self.subscribers
             .with(move |mut guard| {
                 if let Entry::Occupied(mut o) = (*guard).entry(message) {
                     let e = o.get_mut();
-                    e.remove(&subscriber);
+                    e.remove(&sub_id);
 
                     // If that was the last subscriber for a particular message, delete
                     // the message so it doesn't add more overhead to the routing loop.
@@ -279,4 +275,167 @@ pub fn new(socket: TcpStream) -> PublisherHandle {
     );
 
     handle_c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::future;
+    use futures_locks::Mutex;
+    use tokio::sync::{mpsc, oneshot};
+
+    #[test]
+    fn test_subscribe() {
+        let (tx, _) = mpsc::unbounded_channel();
+        let subscribers = Mutex::new(HashMap::new());
+        let message = Message::Provide("/a".into());
+        let message_c = message.clone();
+        let handle = PublisherHandle {
+            consumer: tx,
+            subscribers: subscribers.clone(),
+        };
+
+        // All this extra fluff around future::lazy() is necessary to ensure that there
+        // is an active executor when subscribe() calls Mutex::with().
+        let (tx, mut rx) = oneshot::channel();
+        tokio::run(future::lazy(move || {
+            let (id, fut) = handle.subscribe(
+                message_c,
+                Subscriber::OnetimeTask(Box::new(|_| Box::new(future::ok(())))),
+            );
+            tx.send(id).unwrap();
+            fut
+        }));
+
+        match subscribers.try_unwrap() {
+            Ok(subs) => assert!(subs[&message].contains_key(&rx.try_recv().unwrap())),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_unsubscribe_single() {
+        let (tx, _) = mpsc::unbounded_channel();
+
+        let mut subs = HashMap::new();
+
+        let mut message_subs = HashMap::new();
+        let uuid = add_message_sub(&mut message_subs);
+        let message = add_message(Message::Provide("/a".into()), message_subs, &mut subs);
+        let message_c = message.clone();
+
+        let subscribers = Mutex::new(subs);
+
+        let handle = PublisherHandle {
+            consumer: tx,
+            subscribers: subscribers.clone(),
+        };
+
+        // All this extra fluff around future::lazy() is necessary to ensure that there
+        // is an active executor when subscribe() calls Mutex::with().
+        tokio::run(future::lazy(move || handle.unsubscribe(message, uuid)));
+
+        match subscribers.try_unwrap() {
+            Ok(subs) => assert!(!subs.contains_key(&message_c)),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_unsubscribe_multiple() {
+        let (tx, _) = mpsc::unbounded_channel();
+
+        let mut subs = HashMap::new();
+
+        let mut message_subs = HashMap::new();
+        let uuid1 = add_message_sub(&mut message_subs);
+        let uuid2 = add_message_sub(&mut message_subs);
+        let message = add_message(Message::Provide("/a".into()), message_subs, &mut subs);
+        let message_c = message.clone();
+
+        let subscribers = Mutex::new(subs);
+
+        let handle = PublisherHandle {
+            consumer: tx,
+            subscribers: subscribers.clone(),
+        };
+
+        // All this extra fluff around future::lazy() is necessary to ensure that there
+        // is an active executor when subscribe() calls Mutex::with().
+        tokio::run(future::lazy(move || handle.unsubscribe(message, uuid1)));
+
+        match subscribers.try_unwrap() {
+            Ok(subs) => {
+                assert!(subs.contains_key(&message_c));
+                assert!(!subs[&message_c].contains_key(&uuid1));
+                assert!(subs[&message_c].contains_key(&uuid2));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_unsubscribe_children() {
+        let (tx, _) = mpsc::unbounded_channel();
+
+        let mut subs = HashMap::new();
+
+        let mut message_subs = HashMap::new();
+        add_message_sub(&mut message_subs);
+        let provide_a = add_message(Message::Provide("/a".into()), message_subs, &mut subs);
+
+        let mut message_subs = HashMap::new();
+        add_message_sub(&mut message_subs);
+        let provide_ab = add_message(Message::Provide("/a/b".into()), message_subs, &mut subs);
+
+        let mut message_subs = HashMap::new();
+        add_message_sub(&mut message_subs);
+        let provide_c = add_message(Message::Provide("/c".into()), message_subs, &mut subs);
+
+        let mut message_subs = HashMap::new();
+        add_message_sub(&mut message_subs);
+        let revoke_a = add_message(Message::Revoke("/a".into()), message_subs, &mut subs);
+
+        let subscribers = Mutex::new(subs);
+
+        let handle = PublisherHandle {
+            consumer: tx,
+            subscribers: subscribers.clone(),
+        };
+
+        // All this extra fluff around future::lazy() is necessary to ensure that there
+        // is an active executor when subscribe() calls Mutex::with().
+        tokio::run(future::lazy(move || {
+            handle.unsubscribe_children(Message::Provide("/a".into()))
+        }));
+
+        match subscribers.try_unwrap() {
+            Ok(subs) => {
+                assert!(!subs.contains_key(&provide_a));
+                assert!(!subs.contains_key(&provide_ab));
+                assert!(subs.contains_key(&provide_c));
+                assert!(subs.contains_key(&revoke_a));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn add_message(
+        message: Message,
+        message_subs: HashMap<Uuid, Subscriber>,
+        subs: &mut HashMap<Message, HashMap<Uuid, Subscriber>>,
+    ) -> Message {
+        let message_c = message.clone();
+        subs.insert(message, message_subs);
+        message_c
+    }
+
+    fn add_message_sub(map: &mut HashMap<Uuid, Subscriber>) -> Uuid {
+        let uuid = Uuid::new_v4();
+        map.insert(
+            uuid,
+            Subscriber::Task(Box::new(|_| Box::new(future::ok(())))),
+        );
+        uuid
+    }
 }
