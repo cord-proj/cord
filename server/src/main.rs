@@ -62,7 +62,9 @@ fn main() -> Result<()> {
                 // is important for facilitating subscriptions between consumers of
                 // different publishers.
                 for publisher in publishers.iter() {
-                    tokio::spawn(publisher.link(&newbie));
+                    tokio::spawn(publisher.link(&newbie).map_err(|e| {
+                        dbg!(e);
+                    }));
                 }
 
                 // Finally, add the newbie to the list of existing publishers

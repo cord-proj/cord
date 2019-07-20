@@ -112,7 +112,7 @@ impl Message {
         }
     }
 
-    // Unfortunately Rust doesn't provide a way to access the underlying discriminant
+    // XXX Unfortunately Rust doesn't provide a way to access the underlying discriminant
     // value. Thus we have to invent our own. Lame!
     //
     // The fn name is going to stay horrible until a better solution is found. Don't want
@@ -126,6 +126,11 @@ impl Message {
             Message::Unsubscribe(_) => 3,
             Message::Event(_, _) => 4,
         }
+    }
+
+    pub fn contains(&self, other: &Message) -> bool {
+        mem::discriminant(self) == mem::discriminant(&other)
+            && self.namespace().contains(other.namespace())
     }
 }
 
@@ -376,6 +381,27 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_multiple() {
+        let mut decoder = MessageCodec::new();
+
+        let mut bytes = BytesMut::from("\x01\0\r/my/namespace");
+        let msg = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert_eq!(msg, Some(Message::Revoke("/my/namespace".into())));
+
+        bytes.put_u8(4);
+        bytes.put_u16_be(4);
+        bytes.extend_from_slice(b"/moo");
+        bytes.put_u32_be(3);
+        bytes.extend_from_slice(b"cow");
+        let msg = decoder
+            .decode(&mut bytes)
+            .expect("Failed to decode message");
+        assert_eq!(msg, Some(Message::Event("/moo".into(), "cow".into())));
+    }
+
+    #[test]
     fn test_poor_mans_discriminant() {
         let pattern = Pattern::new("/");
 
@@ -431,23 +457,20 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_multiple() {
-        let mut decoder = MessageCodec::new();
+    fn test_message_contains() {
+        let message = Message::Provide("/a".into());
 
-        let mut bytes = BytesMut::from("\x01\0\r/my/namespace");
-        let msg = decoder
-            .decode(&mut bytes)
-            .expect("Failed to decode message");
-        assert_eq!(msg, Some(Message::Revoke("/my/namespace".into())));
+        // Should contain the same namespace
+        assert!(message.contains(&Message::Provide("/a".into())));
+        // Should contain a sub-namespace
+        assert!(message.contains(&Message::Provide("/a/b".into())));
+        // Should not contain a different message type
+        assert!(!message.contains(&Message::Revoke("/a".into())));
+        // Should not contain a different namespace
+        assert!(!message.contains(&Message::Provide("/c".into())));
 
-        bytes.put_u8(4);
-        bytes.put_u16_be(4);
-        bytes.extend_from_slice(b"/moo");
-        bytes.put_u32_be(3);
-        bytes.extend_from_slice(b"cow");
-        let msg = decoder
-            .decode(&mut bytes)
-            .expect("Failed to decode message");
-        assert_eq!(msg, Some(Message::Event("/moo".into(), "cow".into())));
+        // Event messages should not consider their data components
+        let message = Message::Event("/a".into(), String::new());
+        assert!(message.contains(&Message::Event("/a".into(), "b".into())));
     }
 }
