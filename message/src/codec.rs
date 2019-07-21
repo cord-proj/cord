@@ -1,7 +1,6 @@
-use crate::errors::*;
+use crate::{errors::*, message::Message};
 use bytes::{buf::BufMut, BytesMut};
 use error_chain::bail;
-use pattern_matcher::Pattern;
 use tokio_codec::{Decoder, Encoder};
 
 use std::{convert::TryInto, mem, result::Result as StdResult, u16, u32, u8};
@@ -43,99 +42,8 @@ macro_rules! read_str_frame {
     };
 }
 
-macro_rules! unwrap_msg {
-    ($variant:tt, $func_name:ident) => (
-        pub fn $func_name(self) -> Pattern {
-            match self {
-                Message::$variant(pattern) => pattern,
-                _ => panic!("Expected Message variant $variant, got {:?}", self)
-            }
-        }
-    )
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum Message {
-    Provide(Pattern),
-    Revoke(Pattern),
-    Subscribe(Pattern),
-    Unsubscribe(Pattern),
-    Event(Pattern, String),
-}
-
-impl Message {
-    // Check that the discriminant is in range. The magic number "4" is the maximum
-    // integer assigned to a Message variant. See `poor_mans_discriminant()` for details.
-    // Note that we take a ref u8 instead of an owned u8 to be compatible with
-    // `Option::filter`, which passes all args by ref.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    pub fn test_poor_mans_discriminant(discriminant: &u8) -> bool {
-        *discriminant <= 4
-    }
-
-    // This function takes a discriminant and all other data necessary to instantiate a
-    // new Message variant. To avoid panics, first check the discriminant with
-    // `test_poor_mans_discriminant()`.
-    pub fn from_poor_mans_discriminant(
-        discriminant: u8,
-        namespace: Pattern,
-        data: Option<String>,
-    ) -> Self {
-        match discriminant {
-            0 => Message::Provide(namespace),
-            1 => Message::Revoke(namespace),
-            2 => Message::Subscribe(namespace),
-            3 => Message::Unsubscribe(namespace),
-            4 => Message::Event(
-                namespace,
-                data.expect("Data must be present for Message::Event type"),
-            ),
-            _ => panic!("Invalid discriminant {}", discriminant),
-        }
-    }
-
-    // These macro-generated functions will destructure the Message enum, returning an
-    // owned Pattern.
-    unwrap_msg!(Provide, unwrap_provide);
-    unwrap_msg!(Revoke, unwrap_revoke);
-    unwrap_msg!(Subscribe, unwrap_subscribe);
-    unwrap_msg!(Unsubscribe, unwrap_unsubscribe);
-
-    // Return the namespace pattern for any variant
-    pub fn namespace(&self) -> &Pattern {
-        match self {
-            Message::Provide(p) => p,
-            Message::Revoke(p) => p,
-            Message::Subscribe(p) => p,
-            Message::Unsubscribe(p) => p,
-            Message::Event(p, _) => p,
-        }
-    }
-
-    // XXX Unfortunately Rust doesn't provide a way to access the underlying discriminant
-    // value. Thus we have to invent our own. Lame!
-    //
-    // The fn name is going to stay horrible until a better solution is found. Don't want
-    // to get comfortable with this hack :)
-    // https://github.com/rust-lang/rust/issues/34244
-    pub fn poor_mans_discriminant(&self) -> u8 {
-        match self {
-            Message::Provide(_) => 0,
-            Message::Revoke(_) => 1,
-            Message::Subscribe(_) => 2,
-            Message::Unsubscribe(_) => 3,
-            Message::Event(_, _) => 4,
-        }
-    }
-
-    pub fn contains(&self, other: &Message) -> bool {
-        mem::discriminant(self) == mem::discriminant(&other)
-            && self.namespace().contains(other.namespace())
-    }
-}
-
-#[derive(Debug)]
-pub struct MessageCodec {
+#[derive(Debug, Default)]
+pub struct Codec {
     discriminant: Option<u8>,
     ns_length: Option<u16>,
     namespace: Option<String>,
@@ -143,22 +51,10 @@ pub struct MessageCodec {
     data: Option<String>,
 }
 
-impl MessageCodec {
-    pub fn new() -> Self {
-        Self {
-            discriminant: None,
-            ns_length: None,
-            namespace: None,
-            data_length: None,
-            data: None,
-        }
-    }
-}
-
 // Message framing on the wire looks like:
 //      [u8             ][u16      ][bytestr  ][u32        ][bytestr]
 //      [ns_discriminant][ns_length][namespace][data_length][data   ]
-impl Encoder for MessageCodec {
+impl Encoder for Codec {
     type Item = Message;
     type Error = Error;
 
@@ -190,7 +86,7 @@ impl Encoder for MessageCodec {
     }
 }
 
-impl Decoder for MessageCodec {
+impl Decoder for Codec {
     type Item = Message;
     type Error = Error;
 
@@ -248,7 +144,7 @@ mod tests {
     fn test_encode_nodata_ok() {
         let msg = Message::Provide("/my/namespace".into());
         let mut bytes = BytesMut::new();
-        let mut encoder = MessageCodec::new();
+        let mut encoder = Codec::default();
         encoder
             .encode(msg, &mut bytes)
             .expect("Failed to encode message");
@@ -259,7 +155,7 @@ mod tests {
     fn test_encode_event_ok() {
         let msg = Message::Event("/my/namespace".into(), "abc, easy as 123".into());
         let mut bytes = BytesMut::new();
-        let mut encoder = MessageCodec::new();
+        let mut encoder = Codec::default();
         encoder
             .encode(msg, &mut bytes)
             .expect("Failed to encode message");
@@ -275,7 +171,7 @@ mod tests {
         let long_str = String::from_utf8(vec![0; (u16::MAX as u32 + 1) as usize]).unwrap();
         let msg = Message::Unsubscribe(long_str.into());
         let mut bytes = BytesMut::new();
-        let mut encoder = MessageCodec::new();
+        let mut encoder = Codec::default();
         match encoder
             .encode(msg, &mut bytes)
             .err()
@@ -296,7 +192,7 @@ mod tests {
         let long_str = String::from_utf8(vec![0; (u32::MAX as u64 + 1) as usize]).unwrap();
         let msg = Message::Event("/".into(), long_str);
         let mut bytes = BytesMut::new();
-        let mut encoder = MessageCodec::new();
+        let mut encoder = Codec::default();
         match encoder
             .encode(msg, &mut bytes)
             .err()
@@ -311,7 +207,7 @@ mod tests {
     #[test]
     fn test_decode_ok() {
         let mut bytes = BytesMut::from("\x01\0\r/my/namespace");
-        let mut decoder = MessageCodec::new();
+        let mut decoder = Codec::default();
         let msg = decoder
             .decode(&mut bytes)
             .expect("Failed to decode message");
@@ -321,7 +217,7 @@ mod tests {
     #[test]
     fn test_decode_invalid_discriminant() {
         let mut bytes = BytesMut::from("\x09");
-        let mut decoder = MessageCodec::new();
+        let mut decoder = Codec::default();
         match decoder.decode(&mut bytes) {
             Ok(_) => panic!("Failed to detect invalid Message discriminant"),
             Err(e) => assert_eq!(e.description(), "Unknown Message discriminant"),
@@ -331,7 +227,7 @@ mod tests {
     #[test]
     fn test_decode_partial() {
         let mut bytes = BytesMut::new();
-        let mut decoder = MessageCodec::new();
+        let mut decoder = Codec::default();
 
         // Test decoding nothing
         let response = decoder
@@ -382,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_decode_multiple() {
-        let mut decoder = MessageCodec::new();
+        let mut decoder = Codec::default();
 
         let mut bytes = BytesMut::from("\x01\0\r/my/namespace");
         let msg = decoder
@@ -399,78 +295,5 @@ mod tests {
             .decode(&mut bytes)
             .expect("Failed to decode message");
         assert_eq!(msg, Some(Message::Event("/moo".into(), "cow".into())));
-    }
-
-    #[test]
-    fn test_poor_mans_discriminant() {
-        let pattern = Pattern::new("/");
-
-        let provide = Message::Provide(pattern.clone());
-        assert_eq!(
-            Message::from_poor_mans_discriminant(
-                provide.poor_mans_discriminant(),
-                pattern.clone(),
-                None
-            ),
-            provide
-        );
-
-        let revoke = Message::Revoke(pattern.clone());
-        assert_eq!(
-            Message::from_poor_mans_discriminant(
-                revoke.poor_mans_discriminant(),
-                pattern.clone(),
-                None
-            ),
-            revoke
-        );
-
-        let subscribe = Message::Subscribe(pattern.clone());
-        assert_eq!(
-            Message::from_poor_mans_discriminant(
-                subscribe.poor_mans_discriminant(),
-                pattern.clone(),
-                None
-            ),
-            subscribe
-        );
-
-        let unsubscribe = Message::Unsubscribe(pattern.clone());
-        assert_eq!(
-            Message::from_poor_mans_discriminant(
-                unsubscribe.poor_mans_discriminant(),
-                pattern.clone(),
-                None
-            ),
-            unsubscribe
-        );
-
-        let event = Message::Event(pattern.clone(), String::new());
-        assert_eq!(
-            Message::from_poor_mans_discriminant(
-                event.poor_mans_discriminant(),
-                pattern.clone(),
-                Some(String::new())
-            ),
-            event
-        );
-    }
-
-    #[test]
-    fn test_message_contains() {
-        let message = Message::Provide("/a".into());
-
-        // Should contain the same namespace
-        assert!(message.contains(&Message::Provide("/a".into())));
-        // Should contain a sub-namespace
-        assert!(message.contains(&Message::Provide("/a/b".into())));
-        // Should not contain a different message type
-        assert!(!message.contains(&Message::Revoke("/a".into())));
-        // Should not contain a different namespace
-        assert!(!message.contains(&Message::Provide("/c".into())));
-
-        // Event messages should not consider their data components
-        let message = Message::Event("/a".into(), String::new());
-        assert!(message.contains(&Message::Event("/a".into(), "b".into())));
     }
 }

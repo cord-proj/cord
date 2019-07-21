@@ -1,47 +1,30 @@
-use crate::{
-    errors::{Error, ErrorKind},
-    message::{Message, MessageCodec},
-};
-use futures::{self, future, Future, Stream};
+use crate::{errors::Error, subscriber::Subscriber};
+use futures::{self, future, Future};
 use futures_locks::Mutex;
+use message::Message;
 use pattern_matcher::Pattern;
-use tokio::{
-    codec::Framed,
-    net::TcpStream,
-    sync::mpsc::{self, UnboundedSender},
-};
+use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use std::collections::{hash_map::Entry, HashMap};
 
-type SomeFuture = Box<dyn Future<Item = (), Error = Error> + Send>;
-
 #[derive(Clone)]
-pub struct PublisherHandle {
+pub struct Publisher {
     // This is a channel to the write half of our TcpStream
     consumer: UnboundedSender<Message>,
     subscribers: Mutex<HashMap<Message, HashMap<Uuid, Subscriber>>>,
 }
 
-enum Subscriber {
-    Consumer(UnboundedSender<Message>),
-    // @todo Replace trait object with impl Trait once stabilised:
-    // https://github.com/rust-lang/rust/issues/34511
-    // Task(Box<FnMut(Message, PublisherHandle) -> impl Future<Item=(), Error=()>>)
-    Task(Box<FnMut(Message) -> SomeFuture + Send>),
-    OnetimeTask(Option<Box<FnOnce(Message) -> SomeFuture + Send>>),
-}
-
-impl PublisherHandle {
-    fn new(consumer: UnboundedSender<Message>) -> PublisherHandle {
-        PublisherHandle {
+impl Publisher {
+    pub fn new(consumer: UnboundedSender<Message>) -> Publisher {
+        Publisher {
             consumer,
             subscribers: Mutex::new(HashMap::new()),
         }
     }
 
     // Link two publishers together so that they can subscribe to each other's streams
-    pub fn link(&self, other: &PublisherHandle) -> impl Future<Item = (), Error = Error> {
+    pub fn link(&self, other: &Publisher) -> impl Future<Item = (), Error = Error> {
         let me = self.clone();
         let you = other.clone();
 
@@ -50,7 +33,7 @@ impl PublisherHandle {
 
     // Helper function for subscribing another publisher to our PROVIDE and REVOKE
     // messages
-    fn on_link(&self, other: PublisherHandle) -> impl Future<Item = (), Error = Error> {
+    fn on_link(&self, other: Publisher) -> impl Future<Item = (), Error = Error> {
         let me = self.clone();
         let me_two = self.clone();
 
@@ -83,7 +66,7 @@ impl PublisherHandle {
     fn on_provide(
         &self,
         namespace: Pattern,
-        other: PublisherHandle,
+        other: Publisher,
     ) -> impl Future<Item = (), Error = Error> {
         let me = self.clone();
         let me_two = self.clone();
@@ -119,7 +102,7 @@ impl PublisherHandle {
     fn on_subscribe(
         &self,
         namespace: Pattern,
-        other: PublisherHandle,
+        other: Publisher,
     ) -> impl Future<Item = (), Error = Error> {
         let me = self.clone();
         let namespace_clone = namespace.clone();
@@ -201,7 +184,9 @@ impl PublisherHandle {
             .expect("The default executor has shut down")
     }
 
-    fn route(&self, message: Message) -> impl Future<Item = (), Error = Error> {
+    // Route a message to all interested subscribers, making sure we clean up any
+    // subscribers that are only executed once (i.e. OnetimeTask).
+    pub fn route(&self, message: Message) -> impl Future<Item = (), Error = Error> {
         self.subscribers
             .with(move |mut guard| {
                 let mut futs = vec![];
@@ -229,59 +214,6 @@ impl PublisherHandle {
             })
             .expect("The default executor has shut down")
     }
-}
-
-impl Subscriber {
-    fn recv(&mut self, message: Message) -> (bool, SomeFuture) {
-        match self {
-            // Retain subscriber in map if the channel is ok
-            Subscriber::Consumer(ref mut chan) => {
-                (chan.try_send(message).is_ok(), Box::new(future::ok(())))
-            }
-            Subscriber::Task(f) => {
-                (true, f(message)) // Retain subscriber in map
-            }
-            Subscriber::OnetimeTask(opt) => {
-                (
-                    false, // Don't retain subscriber in map
-                    opt.take().expect("OnetimeTask already executed")(message),
-                )
-            }
-        }
-    }
-}
-
-pub fn new(socket: TcpStream) -> PublisherHandle {
-    let framed = Framed::new(socket, MessageCodec::new());
-    let (sink, stream) = framed.split();
-
-    // Create a channel for the consumer (sink) half of the socket. This allows us to
-    // pass clones of the channel to multiple producers to facilitate a consumer's
-    // subscriptions.
-    let (consumer_tx, consumer_rx) = mpsc::unbounded_channel();
-
-    // Spawn task to drain channel receiver into socket sink
-    tokio::spawn(
-        consumer_rx
-            .map_err(|e| Error::from_kind(ErrorKind::ChanRecv(e)))
-            .forward(sink)
-            .map(|_| ())
-            .map_err(|_| ()),
-    );
-
-    // Create a clonable publisher handle so we can control the publisher from afar
-    let handle = PublisherHandle::new(consumer_tx);
-    let handle_c = handle.clone();
-
-    // This is the main routing task. For each message we receive, find all the
-    // subscribers that match it, then pass each a copy via `recv()`.
-    tokio::spawn(
-        stream
-            .for_each(move |message| handle.route(message))
-            .map_err(|_| ()),
-    );
-
-    handle_c
 }
 
 #[cfg(test)]
@@ -417,13 +349,13 @@ mod tests {
 
         let s1 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
-        let h1 = PublisherHandle {
+        let h1 = Publisher {
             consumer: tx,
             subscribers: s1.clone(),
         };
 
         let (tx, _) = mpsc::unbounded_channel();
-        let h2 = PublisherHandle {
+        let h2 = Publisher {
             consumer: tx,
             subscribers: Mutex::new(HashMap::new()),
         };
@@ -457,14 +389,14 @@ mod tests {
 
         let s1 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
-        let h1 = PublisherHandle {
+        let h1 = Publisher {
             consumer: tx,
             subscribers: s1.clone(),
         };
 
         let s2 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
-        let h2 = PublisherHandle {
+        let h2 = Publisher {
             consumer: tx,
             subscribers: s2.clone(),
         };
@@ -498,14 +430,14 @@ mod tests {
 
         let s1 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
-        let h1 = PublisherHandle {
+        let h1 = Publisher {
             consumer: tx,
             subscribers: s1.clone(),
         };
 
         let s2 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
-        let h2 = PublisherHandle {
+        let h2 = Publisher {
             consumer: tx,
             subscribers: s2.clone(),
         };
@@ -537,7 +469,7 @@ mod tests {
         let subscribers = Mutex::new(HashMap::new());
         let message = Message::Provide("/a".into());
         let message_c = message.clone();
-        let handle = PublisherHandle {
+        let handle = Publisher {
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -577,7 +509,7 @@ mod tests {
 
         let subscribers = Mutex::new(subs);
 
-        let handle = PublisherHandle {
+        let handle = Publisher {
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -612,7 +544,7 @@ mod tests {
 
         let subscribers = Mutex::new(subs);
 
-        let handle = PublisherHandle {
+        let handle = Publisher {
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -659,7 +591,7 @@ mod tests {
 
         let subscribers = Mutex::new(subs);
 
-        let handle = PublisherHandle {
+        let handle = Publisher {
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -697,7 +629,7 @@ mod tests {
 
         let subscribers = Mutex::new(subs);
 
-        let handle = PublisherHandle {
+        let handle = Publisher {
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -738,7 +670,7 @@ mod tests {
 
         let subscribers = Mutex::new(subs);
 
-        let handle = PublisherHandle {
+        let handle = Publisher {
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -777,7 +709,7 @@ mod tests {
 
         let subscribers = Mutex::new(subs);
 
-        let handle = PublisherHandle {
+        let handle = Publisher {
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -794,75 +726,6 @@ mod tests {
 
         // Check that subscribers is empty
         assert!(subscribers.try_lock().ok().unwrap().is_empty());
-
-        RUNTIME.lock().unwrap().stop();
-    }
-
-    #[test]
-    fn test_subscriber_recv_consumer() {
-        RUNTIME.lock().unwrap().start();
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (txo, mut rxo) = oneshot::channel();
-        let message = Message::Event("/a".into(), "abc".into());
-        let message_c = message.clone();
-
-        let mut consumer = Subscriber::Consumer(tx);
-        let (retain, _) = consumer.recv(message);
-        assert!(retain);
-
-        RUNTIME.lock().unwrap().block_on(
-            rx.into_future()
-                .and_then(|(msg, _)| {
-                    txo.send(msg.unwrap()).unwrap();
-                    future::ok(())
-                })
-                .map_err(|_| ()),
-        );
-        assert_eq!(rxo.try_recv().unwrap(), message_c);
-
-        RUNTIME.lock().unwrap().stop();
-    }
-
-    #[test]
-    fn test_subscriber_recv_task() {
-        RUNTIME.lock().unwrap().start();
-
-        let (tx, mut rx) = oneshot::channel();
-        let mut tx = Some(tx);
-        let message = Message::Event("/a".into(), "abc".into());
-        let message_c = message.clone();
-
-        let mut consumer = Subscriber::Task(Box::new(move |msg| {
-            tx.take().unwrap().send(msg).unwrap();
-            Box::new(future::ok(()))
-        }));
-        RUNTIME.lock().unwrap().block_on(future::lazy(move || {
-            consumer.recv(message);
-            future::ok(())
-        }));
-        assert_eq!(rx.try_recv().unwrap(), message_c);
-
-        RUNTIME.lock().unwrap().stop();
-    }
-
-    #[test]
-    fn test_subscriber_recv_onetime_task() {
-        RUNTIME.lock().unwrap().start();
-
-        let (tx, mut rx) = oneshot::channel();
-        let message = Message::Event("/a".into(), "abc".into());
-        let message_c = message.clone();
-
-        let mut consumer = Subscriber::OnetimeTask(Some(Box::new(move |msg| {
-            tx.send(msg).unwrap();
-            Box::new(future::ok(()))
-        })));
-        RUNTIME.lock().unwrap().block_on(future::lazy(move || {
-            consumer.recv(message);
-            future::ok(())
-        }));
-        assert_eq!(rx.try_recv().unwrap(), message_c);
 
         RUNTIME.lock().unwrap().stop();
     }

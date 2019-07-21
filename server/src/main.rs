@@ -1,13 +1,17 @@
 #[allow(deprecated)]
 mod errors;
-mod message;
-mod pubsub;
 
 use clap::{App, Arg};
 use errors::*;
-use pubsub::PublisherHandle;
-use tokio::net::TcpListener;
-use tokio::prelude::*;
+use futures::{future::Future, stream::Stream};
+use message::{Codec, Message};
+use pubsub::{self, Publisher};
+use tokio::{
+    codec::Framed,
+    net::{TcpListener, TcpStream},
+    prelude::stream::SplitSink,
+    sync::mpsc::{self, UnboundedSender},
+};
 
 fn main() -> Result<()> {
     let matches = App::new("Server")
@@ -46,7 +50,7 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind(&addr).expect("unable to bind TCP listener");
 
     // Create a new vector to store handles for all of the existing publishers
-    let mut publishers: Vec<PublisherHandle> = vec![];
+    let mut publishers: Vec<Publisher> = vec![];
 
     // Pull out a stream of sockets for incoming connections
     tokio::run(
@@ -54,8 +58,26 @@ fn main() -> Result<()> {
             .incoming()
             .map_err(|e| eprintln!("accept failed = {:?}", e))
             .for_each(move |sock| {
-                // Create a new publisher/subscriber, and kick off their async tasks
-                let newbie = pubsub::new(sock);
+                // Wrap socket in message codec
+                let framed = Framed::new(sock, Codec::default());
+                let (sink, stream) = framed.split();
+
+                // Convert sink to channel so that we can clone it and distribute to
+                // multiple publishers
+                let subscriber = sink_to_channel(sink);
+
+                // Create a clonable publisher handle so we can control the publisher from afar
+                let handle = Publisher::new(subscriber);
+                let newbie = handle.clone();
+
+                // This is the main routing task. For each message we receive, find all the
+                // subscribers that match it, then pass each a copy via `recv()`.
+                tokio::spawn(
+                    stream
+                        .map_err(|e| pubsub::errors::ErrorKind::Message(e).into())
+                        .for_each(move |message| handle.route(message))
+                        .map_err(|_| ()),
+                );
 
                 // Introduce the newbie to all the other publishers. This allows each
                 // publisher to subscribe to the other publishers' SUBSCRIBE events. This
@@ -75,4 +97,21 @@ fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+// Create a channel for the consumer (sink) half of the socket. This allows us to
+// pass clones of the channel to multiple producers to facilitate a consumer's
+// subscriptions.
+fn sink_to_channel(sink: SplitSink<Framed<TcpStream, Codec>>) -> UnboundedSender<Message> {
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    // Spawn task to drain channel receiver into socket sink
+    tokio::spawn(
+        rx.map_err(|e| Error::from_kind(ErrorKind::ChanRecv(e)))
+            .forward(sink)
+            .map(|_| ())
+            .map_err(|_| ()),
+    );
+
+    tx
 }

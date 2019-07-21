@@ -1,14 +1,17 @@
 [package]
-name = "server"
+name = "pubsub"
 version = "0.1.0"
 authors = ["Pete Hayes <pete@hayes.id.au>"]
 edition = "2018"
 
 [dependencies]
-clap = "2.33"
 error-chain = "0.12"
 futures = "0.1"
+futures-locks = "0.3"
 message = { version = "0.1", path = "../message" }
 pattern-matcher = { version = "0.1", path = "../pattern-matcher" }
-pubsub = { version = "0.1", path = "../pubsub" }
 tokio = "0.1"
+uuid = { version = "0.7", features = ["v4"] }
+
+[dev-dependencies]
+lazy_static = "1.3"
