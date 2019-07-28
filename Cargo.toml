@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "client",
   "message",
   "pattern-matcher",
   "pubsub",
