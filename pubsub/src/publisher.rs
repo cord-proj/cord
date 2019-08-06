@@ -1,23 +1,36 @@
 use crate::{errors::Error, subscriber::Subscriber};
 use futures::{self, future, Future};
 use futures_locks::Mutex;
+use log::debug;
 use message::Message;
 use pattern_matcher::Pattern;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    fmt,
+    net::SocketAddr,
+};
 
 #[derive(Clone)]
 pub struct Publisher {
+    name: SocketAddr,
     // This is a channel to the write half of our TcpStream
     consumer: UnboundedSender<Message>,
     subscribers: Mutex<HashMap<Message, HashMap<Uuid, Subscriber>>>,
 }
 
+impl fmt::Display for Publisher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Publisher<{}>", self.name)
+    }
+}
+
 impl Publisher {
-    pub fn new(consumer: UnboundedSender<Message>) -> Publisher {
+    pub fn new(name: SocketAddr, consumer: UnboundedSender<Message>) -> Publisher {
         Publisher {
+            name,
             consumer,
             subscribers: Mutex::new(HashMap::new()),
         }
@@ -25,6 +38,8 @@ impl Publisher {
 
     // Link two publishers together so that they can subscribe to each other's streams
     pub fn link(&self, other: &Publisher) -> impl Future<Item = (), Error = Error> {
+        debug!(target: "publisher", "Link {} with {}", self, other);
+
         let me = self.clone();
         let you = other.clone();
 
@@ -39,7 +54,7 @@ impl Publisher {
 
         // Subscribe to PROVIDE messages
         let (_, futp) = self.subscribe(
-            Message::Provide("*".into()),
+            Message::Provide("/".into()),
             Subscriber::Task(Box::new(move |message| {
                 Box::new(other.on_provide(message.unwrap_provide(), me.clone()))
             })),
@@ -50,7 +65,7 @@ impl Publisher {
         // revoked namespace.
         let (_, futr) =
             self.subscribe(
-                Message::Revoke("*".into()),
+                Message::Revoke("/".into()),
                 Subscriber::Task(Box::new(move |message| {
                     Box::new(me_two.unsubscribe_children(Message::Event(
                         message.unwrap_revoke(),
@@ -138,6 +153,8 @@ impl Publisher {
     ) -> (Uuid, impl Future<Item = (), Error = Error>) {
         let uuid = Uuid::new_v4();
 
+        debug!(target: "publisher", "Subscribe {} to {:?} for {}", uuid, message, self);
+
         (
             uuid,
             self.subscribers
@@ -154,6 +171,8 @@ impl Publisher {
 
     // Remove a Subscriber for a specific Message from our subscriber list
     fn unsubscribe(&self, message: Message, sub_id: Uuid) -> impl Future<Item = (), Error = Error> {
+        debug!(target: "publisher", "Unsubscribe {} from {:?} for {}", sub_id, message, self);
+
         self.subscribers
             .with(move |mut guard| {
                 if let Entry::Occupied(mut o) = (*guard).entry(message) {
@@ -176,6 +195,8 @@ impl Publisher {
     // For example: Subscribe(/a) contains Subscribe(/a/b), so Subscribe(/a/b) would be
     // removed.
     fn unsubscribe_children(&self, message: Message) -> impl Future<Item = (), Error = Error> {
+        debug!(target: "publisher", "Unsubscribe everyone from {:?} for {}", message, self);
+
         self.subscribers
             .with(move |mut guard| {
                 (*guard).retain(|k, _| !message.contains(&k));
@@ -187,8 +208,12 @@ impl Publisher {
     // Route a message to all interested subscribers, making sure we clean up any
     // subscribers that are only executed once (i.e. OnetimeTask).
     pub fn route(&self, message: Message) -> impl Future<Item = (), Error = Error> {
+        let name = self.name;
+
         self.subscribers
             .with(move |mut guard| {
+                debug!("Received message {:?} from {}", message, name);
+
                 let mut futs = vec![];
 
                 // In the inner loop we may cleanup all of the subscribers in the
@@ -196,6 +221,7 @@ impl Publisher {
                 // be tidied up, hence the use of retain() here.
                 (*guard).retain(|sub_msg, subs| {
                     if sub_msg.contains(&message) {
+                        debug!("Subscriber {:?} matches {:?}", sub_msg, message);
                         // We use retain() here, which allows us to cleanup any
                         // subscribers that have OnetimeTask's or whose channels
                         // have been closed.
@@ -206,6 +232,7 @@ impl Publisher {
                         });
                         !subs.is_empty() // Retain if map contains subscribers
                     } else {
+                        debug!("Subscriber {:?} does not match {:?}", sub_msg, message);
                         true // Retain as we haven't modified the map
                     }
                 });
@@ -227,7 +254,10 @@ mod tests {
         sync::{mpsc, oneshot},
     };
 
-    use std::sync::Mutex as StdMutex;
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Mutex as StdMutex,
+    };
 
     lazy_static! {
         static ref RUNTIME: StdMutex<TokioRuntime> = StdMutex::new(TokioRuntime::new());
@@ -350,12 +380,14 @@ mod tests {
         let s1 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
         let h1 = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: s1.clone(),
         };
 
         let (tx, _) = mpsc::unbounded_channel();
         let h2 = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: Mutex::new(HashMap::new()),
         };
@@ -370,10 +402,10 @@ mod tests {
 
         let subs = s1.try_lock().ok().unwrap();
 
-        let m1 = Message::Provide("*".into());
+        let m1 = Message::Provide("/".into());
         assert_eq!(subs[&m1].len(), 1);
 
-        let m2 = Message::Revoke("*".into());
+        let m2 = Message::Revoke("/".into());
         assert_eq!(subs[&m2].len(), 1);
 
         RUNTIME.lock().unwrap().stop();
@@ -390,6 +422,7 @@ mod tests {
         let s1 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
         let h1 = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: s1.clone(),
         };
@@ -397,6 +430,7 @@ mod tests {
         let s2 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
         let h2 = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: s2.clone(),
         };
@@ -431,6 +465,7 @@ mod tests {
         let s1 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
         let h1 = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: s1.clone(),
         };
@@ -438,6 +473,7 @@ mod tests {
         let s2 = Mutex::new(HashMap::new());
         let (tx, _) = mpsc::unbounded_channel();
         let h2 = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: s2.clone(),
         };
@@ -470,6 +506,7 @@ mod tests {
         let message = Message::Provide("/a".into());
         let message_c = message.clone();
         let handle = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -510,6 +547,7 @@ mod tests {
         let subscribers = Mutex::new(subs);
 
         let handle = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -545,6 +583,7 @@ mod tests {
         let subscribers = Mutex::new(subs);
 
         let handle = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -592,6 +631,7 @@ mod tests {
         let subscribers = Mutex::new(subs);
 
         let handle = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -630,6 +670,7 @@ mod tests {
         let subscribers = Mutex::new(subs);
 
         let handle = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -671,6 +712,7 @@ mod tests {
         let subscribers = Mutex::new(subs);
 
         let handle = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: subscribers.clone(),
         };
@@ -710,6 +752,7 @@ mod tests {
         let subscribers = Mutex::new(subs);
 
         let handle = Publisher {
+            name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
             subscribers: subscribers.clone(),
         };

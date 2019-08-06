@@ -9,5 +9,6 @@ error_chain! {
         Io(::std::io::Error);
         Message(message::errors::Error);
         SubscriberError(RecvError);
+        Terminate(::tokio::sync::oneshot::error::RecvError);
     }
 }

@@ -166,7 +166,10 @@ mod tests {
         assert!(!message.contains(&Message::Provide("/c".into())));
 
         // Event messages should not consider their data components
-        let message = Message::Event("/a".into(), String::new());
-        assert!(message.contains(&Message::Event("/a".into(), "b".into())));
+        assert!(Message::Event("/a".into(), String::new())
+            .contains(&Message::Event("/a".into(), "b".into())));
+
+        // Root namespace should match everything
+        assert!(Message::Provide("/".into()).contains(&Message::Provide("/a/b/c".into())));
     }
 }

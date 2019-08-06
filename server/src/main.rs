@@ -2,8 +2,10 @@
 mod errors;
 
 use clap::{App, Arg};
+use env_logger;
 use errors::*;
 use futures::{future::Future, stream::Stream};
+use log::error;
 use message::{Codec, Message};
 use pubsub::{self, Publisher};
 use tokio::{
@@ -13,7 +15,11 @@ use tokio::{
     sync::mpsc::{self, UnboundedSender},
 };
 
+use std::net::SocketAddr;
+
 fn main() -> Result<()> {
+    env_logger::init();
+
     let matches = App::new("Server")
         .version("1.0")
         .author("Pete Hayes <pete@hayes.id.au>")
@@ -38,16 +44,25 @@ fn main() -> Result<()> {
         ).get_matches();
 
     // Bind the server's socket
+    let port = matches.value_of("port").unwrap().trim();
     let addr = format!(
         "{}:{}",
         // This unwrap is safe as a default value will always be available
-        matches.value_of("bind").unwrap(),
+        matches.value_of("bind").unwrap().trim(),
         // This unwrap is safe as a default value will always be available
-        matches.value_of("port").unwrap()
+        port
     )
     .parse()
     .chain_err(|| "Invalid bind address")?;
     let listener = TcpListener::bind(&addr).expect("unable to bind TCP listener");
+
+    // If port is set to 0, the user wants us to bind to a random port. It would be
+    // neighbourly to tell them what we've bound to!
+    if port == "0" {
+        if let Ok(SocketAddr::V4(s)) = listener.local_addr() {
+            println!("{}", s.port());
+        }
+    }
 
     // Create a new vector to store handles for all of the existing publishers
     let mut publishers: Vec<Publisher> = vec![];
@@ -58,39 +73,44 @@ fn main() -> Result<()> {
             .incoming()
             .map_err(|e| eprintln!("accept failed = {:?}", e))
             .for_each(move |sock| {
-                // Wrap socket in message codec
-                let framed = Framed::new(sock, Codec::default());
-                let (sink, stream) = framed.split();
+                match sock.peer_addr() {
+                    Ok(name) => {
+                        // Wrap socket in message codec
+                        let framed = Framed::new(sock, Codec::default());
+                        let (sink, stream) = framed.split();
 
-                // Convert sink to channel so that we can clone it and distribute to
-                // multiple publishers
-                let subscriber = sink_to_channel(sink);
+                        // Convert sink to channel so that we can clone it and distribute to
+                        // multiple publishers
+                        let subscriber = sink_to_channel(sink);
 
-                // Create a clonable publisher handle so we can control the publisher from afar
-                let handle = Publisher::new(subscriber);
-                let newbie = handle.clone();
+                        // Create a clonable publisher handle so we can control the publisher from afar
+                        let handle = Publisher::new(name, subscriber);
+                        let newbie = handle.clone();
 
-                // This is the main routing task. For each message we receive, find all the
-                // subscribers that match it, then pass each a copy via `recv()`.
-                tokio::spawn(
-                    stream
-                        .map_err(|e| pubsub::errors::ErrorKind::Message(e).into())
-                        .for_each(move |message| handle.route(message))
-                        .map_err(|_| ()),
-                );
+                        // This is the main routing task. For each message we receive, find all the
+                        // subscribers that match it, then pass each a copy via `recv()`.
+                        tokio::spawn(
+                            stream
+                                .map_err(|e| pubsub::errors::ErrorKind::Message(e).into())
+                                .for_each(move |message| handle.route(message))
+                                .map_err(|_| ()),
+                        );
 
-                // Introduce the newbie to all the other publishers. This allows each
-                // publisher to subscribe to the other publishers' SUBSCRIBE events. This
-                // is important for facilitating subscriptions between consumers of
-                // different publishers.
-                for publisher in publishers.iter() {
-                    tokio::spawn(publisher.link(&newbie).map_err(|e| {
-                        dbg!(e);
-                    }));
+                        // Introduce the newbie to all the other publishers. This allows each
+                        // publisher to subscribe to the other publishers' SUBSCRIBE events. This
+                        // is important for facilitating subscriptions between consumers of
+                        // different publishers.
+                        for publisher in publishers.iter() {
+                            tokio::spawn(publisher.link(&newbie).map_err(|e| {
+                                error!("{}", e);
+                            }));
+                        }
+
+                        // Finally, add the newbie to the list of existing publishers
+                        publishers.push(newbie);
+                    }
+                    Err(e) => error!("{}", e),
                 }
-
-                // Finally, add the newbie to the list of existing publishers
-                publishers.push(newbie);
 
                 Ok(())
             }),

@@ -14,7 +14,8 @@ impl Pattern {
             true
         } else {
             // E.g. /a contains /a/b
-            other.0.starts_with(&self.0) && other.0.chars().nth(self.0.len()) == Some('/')
+            other.0.starts_with(&self.0)
+                && (self.0.len() == 1 || other.0.chars().nth(self.0.len()) == Some('/'))
         }
     }
 }
@@ -41,22 +42,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ord_equal() {
+    fn test_root_namespace() {
+        assert!(Pattern::new("/").contains(&Pattern::new("/a")));
+    }
+
+    #[test]
+    fn test_equality() {
         assert_eq!(Pattern::new("/a"), Pattern::new("/a"));
     }
 
     #[test]
-    fn test_ord_unequal() {
+    fn test_inequality() {
         assert!(!Pattern::new("/a/b").contains(&Pattern::new("/ab")))
     }
 
     #[test]
-    fn test_ord_greater() {
+    fn test_contains_child_namespace() {
         assert!(Pattern::new("/a").contains(&Pattern::new("/a/b")))
     }
 
     #[test]
-    fn test_ord_less() {
+    fn test_not_contains_parent() {
         assert!(!Pattern::new("/a/b").contains(&Pattern::new("/a")))
     }
 }

@@ -1,14 +1,14 @@
 pub mod errors;
 
 use errors::{Error, ErrorKind, Result};
-use futures::{future, Future, Stream};
+use futures::{Future, Stream};
 use futures_locks::Mutex;
 use message::{Codec, Message};
 use pattern_matcher::Pattern;
 use retain_mut::RetainMut;
-use tokio::{codec::Framed, net::TcpStream, sync::mpsc};
+use tokio::{codec::Framed, net::TcpStream, sync::mpsc, sync::oneshot};
 
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, ops::Drop};
 
 /// A `Conn` is used to connect to and communicate with a server.
 ///
@@ -26,7 +26,7 @@ use std::{collections::HashMap, net::SocketAddr};
 ///     // Start publishing events...
 ///     conn.event("/users/mark".into(), "Mark has joined").unwrap();
 ///
-///     future::ok(())
+///     Ok(())
 /// }).map_err(|_| ());
 ///
 /// tokio::run(fut);
@@ -34,6 +34,13 @@ use std::{collections::HashMap, net::SocketAddr};
 pub struct Conn {
     sender: mpsc::UnboundedSender<Message>,
     receivers: Mutex<HashMap<Pattern, Vec<mpsc::Sender<Message>>>>,
+    detonator: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.detonator.take().unwrap().send(()).unwrap();
+    }
 }
 
 impl Conn {
@@ -43,6 +50,9 @@ impl Conn {
         // different type to send data that doesn't require ownership. Channels are great
         // for this.
         let (tx, rx) = mpsc::unbounded_channel();
+
+        // This channel is used to shutdown the stream listener when the Conn is dropped
+        let (det_tx, det_rx) = oneshot::channel();
 
         TcpStream::connect(&addr)
             .map(|sock| {
@@ -67,6 +77,7 @@ impl Conn {
                     stream
                         .map_err(|e| Error::from_kind(ErrorKind::Message(e)))
                         .for_each(move |message| route(&receivers_c, message))
+                        .select(det_rx.map_err(|e| Error::from_kind(ErrorKind::Terminate(e))))
                         .map(|_| ())
                         .map_err(|_| ()),
                 );
@@ -74,6 +85,7 @@ impl Conn {
                 Conn {
                     sender: tx,
                     receivers,
+                    detonator: Some(det_tx),
                 }
             })
             .map_err(|e| ErrorKind::Io(e).into())
@@ -104,7 +116,7 @@ impl Conn {
     ///     // Handle the message...
     ///     dbg!("The following user just joined: {}", msg);
     ///
-    ///     future::ok(())
+    ///     Ok(())
     /// }).map_err(|e| ErrorKind::SubscriberError(e).into())
     ///# });
     /// ```
@@ -118,7 +130,7 @@ impl Conn {
                         .entry(namespace_c)
                         .or_insert_with(Vec::new)
                         .push(tx);
-                    future::ok(())
+                    Ok(())
                 })
                 .expect("The default executor has shut down")
                 .map(|_| ()),
@@ -135,7 +147,7 @@ impl Conn {
             self.receivers
                 .with(move |mut guard| {
                     (*guard).remove(&namespace_c);
-                    future::ok(())
+                    Ok(())
                 })
                 .expect("The default executor has shut down")
                 .map(|_| ()),
@@ -176,7 +188,7 @@ fn route(
                 !senders.is_empty()
             });
 
-            future::ok(())
+            Ok(())
         })
         .expect("The default executor has shut down")
 }
@@ -184,14 +196,17 @@ fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::future;
 
     #[test]
     fn test_provide() {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (det_tx, _det_rx) = oneshot::channel();
 
         let mut conn = Conn {
             sender: tx,
             receivers: Mutex::new(HashMap::new()),
+            detonator: Some(det_tx),
         };
 
         conn.provide("/a/b".into()).unwrap();
@@ -204,10 +219,12 @@ mod tests {
     #[test]
     fn test_revoke() {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (det_tx, _det_rx) = oneshot::channel();
 
         let mut conn = Conn {
             sender: tx,
             receivers: Mutex::new(HashMap::new()),
+            detonator: Some(det_tx),
         };
 
         conn.revoke("/a/b".into()).unwrap();
@@ -220,19 +237,21 @@ mod tests {
     #[test]
     fn test_subscribe() {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (det_tx, _det_rx) = oneshot::channel();
 
         let receivers = Mutex::new(HashMap::new());
 
         let mut conn = Conn {
             sender: tx,
             receivers: receivers.clone(),
+            detonator: Some(det_tx),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
         // is an active executor when the fn calls Mutex::with().
         tokio::run(future::lazy(move || {
             conn.subscribe("/a/b".into()).unwrap();
-            future::ok(())
+            Ok(())
         }));
         assert_eq!(
             rx.into_future().wait().unwrap().0.unwrap(),
@@ -244,6 +263,7 @@ mod tests {
     #[test]
     fn test_unsubscribe() {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (det_tx, _det_rx) = oneshot::channel();
 
         let mut receivers = HashMap::new();
         receivers.insert("/a/b".into(), Vec::new());
@@ -253,13 +273,14 @@ mod tests {
         let mut conn = Conn {
             sender: tx,
             receivers,
+            detonator: Some(det_tx),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
         // is an active executor when the fn calls Mutex::with().
         tokio::run(future::lazy(move || {
             conn.unsubscribe("/a/b".into()).unwrap();
-            future::ok(())
+            Ok(())
         }));
         assert_eq!(
             rx.into_future().wait().unwrap().0.unwrap(),
@@ -271,10 +292,12 @@ mod tests {
     #[test]
     fn test_event() {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (det_tx, _det_rx) = oneshot::channel();
 
         let mut conn = Conn {
             sender: tx,
             receivers: Mutex::new(HashMap::new()),
+            detonator: Some(det_tx),
         };
 
         conn.event("/a/b".into(), "moo").unwrap();

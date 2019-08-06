@@ -1,5 +1,6 @@
 use crate::errors::Error;
 use futures::{self, future, Future};
+use log::debug;
 use message::Message;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -19,12 +20,15 @@ impl Subscriber {
         match self {
             // Retain subscriber in map if the channel is ok
             Subscriber::Consumer(ref mut chan) => {
+                debug!(target: "subscriber", "Receive message for consumer: {:?}", message);
                 (chan.try_send(message).is_ok(), Box::new(future::ok(())))
             }
             Subscriber::Task(f) => {
+                debug!(target: "subscriber", "Receive message for task: {:?}", message);
                 (true, f(message)) // Retain subscriber in map
             }
             Subscriber::OnetimeTask(opt) => {
+                debug!(target: "subscriber", "Receive message for one-time task: {:?}", message);
                 (
                     false, // Don't retain subscriber in map
                     opt.take().expect("OnetimeTask already executed")(message),
