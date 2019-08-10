@@ -6,9 +6,9 @@ use futures_locks::Mutex;
 use message::{Codec, Message};
 use pattern_matcher::Pattern;
 use retain_mut::RetainMut;
-use tokio::{codec::Framed, net::TcpStream, sync::mpsc, sync::oneshot};
+use tokio::{codec::Framed, net::TcpStream, prelude::Async, sync::mpsc, sync::oneshot};
 
-use std::{collections::HashMap, net::SocketAddr, ops::Drop};
+use std::{collections::HashMap, net::SocketAddr, ops::Drop, result, sync::Arc};
 
 /// A `Conn` is used to connect to and communicate with a server.
 ///
@@ -33,14 +33,17 @@ use std::{collections::HashMap, net::SocketAddr, ops::Drop};
 /// ```
 pub struct Conn {
     sender: mpsc::UnboundedSender<Message>,
-    receivers: Mutex<HashMap<Pattern, Vec<mpsc::Sender<Message>>>>,
-    detonator: Option<oneshot::Sender<()>>,
+    inner: Arc<Inner>,
 }
 
-impl Drop for Conn {
-    fn drop(&mut self) {
-        self.detonator.take().unwrap().send(()).unwrap();
-    }
+pub struct Subscriber {
+    receiver: mpsc::Receiver<Message>,
+    _inner: Arc<Inner>,
+}
+
+struct Inner {
+    receivers: Mutex<HashMap<Pattern, Vec<mpsc::Sender<Message>>>>,
+    detonator: Option<oneshot::Sender<()>>,
 }
 
 impl Conn {
@@ -84,8 +87,10 @@ impl Conn {
 
                 Conn {
                     sender: tx,
-                    receivers,
-                    detonator: Some(det_tx),
+                    inner: Arc::new(Inner {
+                        receivers,
+                        detonator: Some(det_tx),
+                    }),
                 }
             })
             .map_err(|e| ErrorKind::Io(e).into())
@@ -117,14 +122,17 @@ impl Conn {
     ///     dbg!("The following user just joined: {}", msg);
     ///
     ///     Ok(())
-    /// }).map_err(|e| ErrorKind::SubscriberError(e).into())
+    /// })
     ///# });
     /// ```
-    pub fn subscribe(&mut self, namespace: Pattern) -> Result<mpsc::Receiver<Message>> {
-        let (tx, rx) = mpsc::channel(10);
+    pub fn subscribe(&mut self, namespace: Pattern) -> Result<Subscriber> {
         let namespace_c = namespace.clone();
+        self.sender.try_send(Message::Subscribe(namespace))?;
+
+        let (tx, rx) = mpsc::channel(10);
         tokio::spawn(
-            self.receivers
+            self.inner
+                .receivers
                 .with(move |mut guard| {
                     (*guard)
                         .entry(namespace_c)
@@ -135,16 +143,20 @@ impl Conn {
                 .expect("The default executor has shut down")
                 .map(|_| ()),
         );
-        self.sender.try_send(Message::Subscribe(namespace))?;
-        Ok(rx)
+        Ok(Subscriber {
+            receiver: rx,
+            _inner: self.inner.clone(),
+        })
     }
 
     /// Unsubscribe from another provider's namespace
     pub fn unsubscribe(&mut self, namespace: Pattern) -> Result<()> {
         let namespace_c = namespace.clone();
         self.sender.try_send(Message::Unsubscribe(namespace))?;
+
         tokio::spawn(
-            self.receivers
+            self.inner
+                .receivers
                 .with(move |mut guard| {
                     (*guard).remove(&namespace_c);
                     Ok(())
@@ -193,6 +205,23 @@ fn route(
         .expect("The default executor has shut down")
 }
 
+impl Stream for Subscriber {
+    type Item = Message;
+    type Error = Error;
+
+    fn poll(&mut self) -> result::Result<Async<Option<Self::Item>>, Self::Error> {
+        self.receiver
+            .poll()
+            .map_err(|e| ErrorKind::SubscriberError(e).into())
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.detonator.take().unwrap().send(()).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,8 +234,10 @@ mod tests {
 
         let mut conn = Conn {
             sender: tx,
-            receivers: Mutex::new(HashMap::new()),
-            detonator: Some(det_tx),
+            inner: Arc::new(Inner {
+                receivers: Mutex::new(HashMap::new()),
+                detonator: Some(det_tx),
+            }),
         };
 
         conn.provide("/a/b".into()).unwrap();
@@ -223,8 +254,10 @@ mod tests {
 
         let mut conn = Conn {
             sender: tx,
-            receivers: Mutex::new(HashMap::new()),
-            detonator: Some(det_tx),
+            inner: Arc::new(Inner {
+                receivers: Mutex::new(HashMap::new()),
+                detonator: Some(det_tx),
+            }),
         };
 
         conn.revoke("/a/b".into()).unwrap();
@@ -239,12 +272,15 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let (det_tx, _det_rx) = oneshot::channel();
 
-        let receivers = Mutex::new(HashMap::new());
+        let receivers: Mutex<HashMap<Pattern, Vec<mpsc::Sender<Message>>>> =
+            Mutex::new(HashMap::new());
 
         let mut conn = Conn {
             sender: tx,
-            receivers: receivers.clone(),
-            detonator: Some(det_tx),
+            inner: Arc::new(Inner {
+                receivers: receivers.clone(),
+                detonator: Some(det_tx),
+            }),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -265,15 +301,16 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let (det_tx, _det_rx) = oneshot::channel();
 
-        let mut receivers = HashMap::new();
+        let mut receivers: HashMap<Pattern, Vec<mpsc::Sender<Message>>> = HashMap::new();
         receivers.insert("/a/b".into(), Vec::new());
         let receivers = Mutex::new(receivers);
-        let receivers_c = receivers.clone();
 
         let mut conn = Conn {
             sender: tx,
-            receivers,
-            detonator: Some(det_tx),
+            inner: Arc::new(Inner {
+                receivers: receivers.clone(),
+                detonator: Some(det_tx),
+            }),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -286,7 +323,7 @@ mod tests {
             rx.into_future().wait().unwrap().0.unwrap(),
             Message::Unsubscribe("/a/b".into())
         );
-        assert!(receivers_c.try_unwrap().unwrap().is_empty());
+        assert!(receivers.try_unwrap().unwrap().is_empty());
     }
 
     #[test]
@@ -296,8 +333,10 @@ mod tests {
 
         let mut conn = Conn {
             sender: tx,
-            receivers: Mutex::new(HashMap::new()),
-            detonator: Some(det_tx),
+            inner: Arc::new(Inner {
+                receivers: Mutex::new(HashMap::new()),
+                detonator: Some(det_tx),
+            }),
         };
 
         conn.event("/a/b".into(), "moo").unwrap();
