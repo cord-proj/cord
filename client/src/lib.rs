@@ -36,6 +36,26 @@ pub struct Conn {
     inner: Arc<Inner>,
 }
 
+/// A `Subscriber` encapsulates a stream of events for a subscribed namespace. It is
+/// created by [`Conn::subscribe()`](struct.Conn.html#method.subscribe).
+///
+/// # Examples
+///
+/// ```
+///# use client::Conn;
+///# use client::errors::ErrorKind;
+///# use futures::{future, Future, Stream};
+///# use tokio;
+///
+///# let fut = Conn::new("127.0.0.1:7101".parse().unwrap()).and_then(|mut conn| {
+/// conn.subscribe("/users/".into()).unwrap().for_each(|(namespace, data)| {
+///     // Handle the message...
+///     dbg!("Received the namespace '{}' with data: {}", namespace, data);
+///
+///     Ok(())
+/// })
+///# });
+/// ```
 pub struct Subscriber {
     receiver: mpsc::Receiver<Message>,
     _inner: Arc<Inner>,
@@ -112,7 +132,7 @@ impl Conn {
     ///
     /// ```
     ///# use client::Conn;
-    /// use client::errors::ErrorKind;
+    ///# use client::errors::ErrorKind;
     ///# use futures::{future, Future, Stream};
     ///# use tokio;
     ///
@@ -206,12 +226,20 @@ fn route(
 }
 
 impl Stream for Subscriber {
-    type Item = Message;
+    type Item = (Pattern, String);
     type Error = Error;
 
     fn poll(&mut self) -> result::Result<Async<Option<Self::Item>>, Self::Error> {
         self.receiver
             .poll()
+            .map(|asy| {
+                asy.map(|opt| {
+                    opt.map(|msg| match msg {
+                        Message::Event(pattern, data) => (pattern, data),
+                        _ => unreachable!(),
+                    })
+                })
+            })
             .map_err(|e| ErrorKind::SubscriberError(e).into())
     }
 }

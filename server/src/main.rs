@@ -4,7 +4,7 @@ mod errors;
 use clap::{App, Arg};
 use env_logger;
 use errors::*;
-use futures::{future::Future, stream::Stream};
+use futures::{future, future::Future, stream::Stream};
 use log::error;
 use message::{Codec, Message};
 use pubsub::{self, Publisher};
@@ -44,16 +44,12 @@ fn main() -> Result<()> {
         ).get_matches();
 
     // Bind the server's socket
+    // `value_of().unwrap()` is safe as a default value will always be available
     let port = matches.value_of("port").unwrap().trim();
-    let addr = format!(
-        "{}:{}",
-        // This unwrap is safe as a default value will always be available
-        matches.value_of("bind").unwrap().trim(),
-        // This unwrap is safe as a default value will always be available
-        port
-    )
-    .parse()
-    .chain_err(|| "Invalid bind address")?;
+    // `value_of().unwrap()` is safe as a default value will always be available
+    let addr = format!("{}:{}", matches.value_of("bind").unwrap().trim(), port)
+        .parse()
+        .chain_err(|| "Invalid bind address")?;
     let listener = TcpListener::bind(&addr).expect("unable to bind TCP listener");
 
     // If port is set to 0, the user wants us to bind to a random port. It would be
@@ -67,7 +63,7 @@ fn main() -> Result<()> {
     // Create a new vector to store handles for all of the existing publishers
     let mut publishers: Vec<Publisher> = vec![];
 
-    // Pull out a stream of sockets for incoming connections
+    // Poll the socket for incoming connections
     tokio::run(
         listener
             .incoming()
@@ -87,24 +83,25 @@ fn main() -> Result<()> {
                         let handle = Publisher::new(name, subscriber);
                         let newbie = handle.clone();
 
-                        // This is the main routing task. For each message we receive, find all the
-                        // subscribers that match it, then pass each a copy via `recv()`.
-                        tokio::spawn(
-                            stream
-                                .map_err(|e| pubsub::errors::ErrorKind::Message(e).into())
-                                .for_each(move |message| handle.route(message))
-                                .map_err(|_| ()),
-                        );
-
                         // Introduce the newbie to all the other publishers. This allows each
                         // publisher to subscribe to the other publishers' SUBSCRIBE events. This
                         // is important for facilitating subscriptions between consumers of
                         // different publishers.
+                        let mut futs = Vec::new();
                         for publisher in publishers.iter() {
-                            tokio::spawn(publisher.link(&newbie).map_err(|e| {
+                            futs.push(publisher.link(&newbie).map_err(|e| {
                                 error!("{}", e);
                             }));
                         }
+
+                        // This is the main routing task. For each message we receive, find all the
+                        // subscribers that match it, then pass each a copy via `recv()`.
+                        tokio::spawn(future::join_all(futs).and_then(|_| {
+                            stream
+                                .map_err(|e| pubsub::errors::ErrorKind::Message(e).into())
+                                .for_each(move |message| handle.route(message))
+                                .map_err(|_| ())
+                        }));
 
                         // Finally, add the newbie to the list of existing publishers
                         publishers.push(newbie);
