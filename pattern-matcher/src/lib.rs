@@ -52,17 +52,22 @@ mod tests {
     }
 
     #[test]
+    fn test_case_inequality() {
+        assert_ne!(Pattern::new("/a"), Pattern::new("/A"));
+    }
+
+    #[test]
     fn test_inequality() {
-        assert!(!Pattern::new("/a/b").contains(&Pattern::new("/ab")))
+        assert!(!Pattern::new("/a/b").contains(&Pattern::new("/ab")));
     }
 
     #[test]
     fn test_contains_child_namespace() {
-        assert!(Pattern::new("/a").contains(&Pattern::new("/a/b")))
+        assert!(Pattern::new("/a").contains(&Pattern::new("/a/b")));
     }
 
     #[test]
     fn test_not_contains_parent() {
-        assert!(!Pattern::new("/a/b").contains(&Pattern::new("/a")))
+        assert!(!Pattern::new("/a/b").contains(&Pattern::new("/a")));
     }
 }
