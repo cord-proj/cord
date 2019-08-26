@@ -12,9 +12,7 @@ use std::{
 
 #[test]
 fn test_reciprocal() {
-    let (mut child, port) = utils::start_server();
-
-    let result = panic::catch_unwind(|| {
+    let f = |port| {
         let (tx, mut rx1) = oneshot::channel();
         let client1 = Conn::new(format!("127.0.0.1:{}", port).parse().unwrap())
             .map_err(|e| panic!("{}", e))
@@ -69,10 +67,9 @@ fn test_reciprocal() {
             rx2.try_recv().unwrap(),
             ("/users/add".into(), "Mark has joined".into())
         );
-    });
+    };
 
-    child.kill().expect("Server was not running");
-    result.unwrap();
+    utils::run_client(f);
 }
 
 fn send_event(

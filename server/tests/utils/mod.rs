@@ -1,12 +1,29 @@
 use std::{
     env,
     io::Read,
+    panic,
     path::PathBuf,
     process::{Child, Command, Stdio},
     str,
 };
 
-pub fn start_server() -> (Child, u16) {
+pub fn run_client<F: FnOnce(u16) + panic::UnwindSafe>(f: F) {
+    // Start a new server process
+    let (mut server, port) = start_server();
+
+    // Catch panics to ensure that we have the opportunity to terminate the server
+    let result = panic::catch_unwind(|| f(port));
+
+    // Terminate the server
+    server.kill().expect("Server was not running");
+
+    // Now we can resume panicking if needed
+    if let Err(e) = result {
+        panic::resume_unwind(e);
+    }
+}
+
+fn start_server() -> (Child, u16) {
     let mut child = command().spawn().unwrap();
 
     // Get port number
