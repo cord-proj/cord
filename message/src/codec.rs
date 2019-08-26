@@ -64,6 +64,10 @@ impl Encoder for Codec {
             bail!(ErrorKind::OversizedNamespace);
         }
 
+        // Reserve enough buffer to write the namespace
+        // 3 = u8 (1 byte) + u16 (2 bytes)
+        dst.reserve(3 + message.namespace().len());
+
         // Write the message type to buffer
         dst.put_u8(message.poor_mans_discriminant());
 
@@ -76,6 +80,10 @@ impl Encoder for Codec {
             if data.len() > u32::MAX as usize {
                 bail!(ErrorKind::OversizedData);
             }
+
+            // Reserve enough buffer to write the data
+            // 4 = u32 (4 bytes)
+            dst.reserve(4 + data.len());
 
             // Write data bytes to buffer
             dst.put_u32_be(data.len() as u32);
