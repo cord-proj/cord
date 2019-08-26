@@ -67,7 +67,7 @@ fn main() -> Result<()> {
     tokio::run(
         listener
             .incoming()
-            .map_err(|e| eprintln!("accept failed = {:?}", e))
+            .map_err(|e| error!("accept failed = {:?}", e))
             .for_each(move |sock| {
                 match sock.peer_addr() {
                     Ok(name) => {
