@@ -31,6 +31,7 @@ use std::{collections::HashMap, net::SocketAddr, ops::Drop, result, sync::Arc};
 ///
 /// tokio::run(fut);
 /// ```
+#[derive(Clone)]
 pub struct Conn {
     sender: mpsc::UnboundedSender<Message>,
     inner: Arc<Inner>,
