@@ -117,6 +117,18 @@ impl Conn {
             .map_err(|e| ErrorKind::Io(e).into())
     }
 
+    /// If you have a stream that produces `Message`s, you can forward that directly to
+    /// the inner `Sink` instead of calling the helper methods.
+    pub fn forward<S: Stream<Item = Message, Error = Error>>(
+        self,
+        stream: S,
+    ) -> impl Future<Item = Self, Error = Error> {
+        let inner = self.inner;
+        stream
+            .forward(self.sender)
+            .map(|(_, sender)| Conn { sender, inner })
+    }
+
     /// Inform the server that you will be providing a new namespace
     pub fn provide(&mut self, namespace: Pattern) -> Result<()> {
         Ok(self.sender.try_send(Message::Provide(namespace))?)
@@ -255,6 +267,45 @@ impl Drop for Inner {
 mod tests {
     use super::*;
     use futures::future;
+    use tokio::prelude::Async;
+
+    struct ForwardStream(Vec<Message>);
+    impl Stream for ForwardStream {
+        type Item = Message;
+        type Error = Error;
+
+        fn poll(&mut self) -> Result<Async<Option<Self::Item>>> {
+            Ok(Async::Ready(self.0.pop()))
+        }
+    }
+
+    #[test]
+    fn test_forward() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (det_tx, _det_rx) = oneshot::channel();
+
+        let conn = Conn {
+            sender: tx,
+            inner: Arc::new(Inner {
+                receivers: Mutex::new(HashMap::new()),
+                detonator: Some(det_tx),
+            }),
+        };
+
+        let data_stream = ForwardStream(vec![
+            Message::Event("/a".into(), "b".into()),
+            Message::Provide("/a".into()),
+        ]);
+        conn.forward(data_stream).wait().unwrap();
+
+        // We check these messages in reverse order (i.e. Provide, then Event), because
+        // our budget DIY stream sends them in reverse order.
+        let (item, rx) = rx.into_future().wait().unwrap();
+        assert_eq!(item, Some(Message::Provide("/a".into())));
+
+        let (item, _) = rx.into_future().wait().unwrap();
+        assert_eq!(item, Some(Message::Event("/a".into(), "b".into())));
+    }
 
     #[test]
     fn test_provide() {
