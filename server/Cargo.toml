@@ -16,4 +16,8 @@ pubsub = { version = "0.1", path = "../pubsub" }
 tokio = "0.1"
 
 [dev-dependencies]
+atomic-counter = "1.0"
 client = { path = "../client" }
+futures-locks = "0.4"
+num_cpus = "1.10"
+rand = "0.7"
