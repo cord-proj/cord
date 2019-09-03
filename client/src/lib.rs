@@ -119,10 +119,10 @@ impl Conn {
 
     /// If you have a stream that produces `Message`s, you can forward that directly to
     /// the inner `Sink` instead of calling the helper methods.
-    pub fn forward<S: Stream<Item = Message, Error = Error>>(
-        self,
-        stream: S,
-    ) -> impl Future<Item = Self, Error = Error> {
+    pub fn forward<S>(self, stream: S) -> impl Future<Item = Self, Error = Error>
+    where
+        S: Stream<Item = Message, Error = Error>,
+    {
         let inner = self.inner;
         stream
             .forward(self.sender)
