@@ -100,7 +100,7 @@ fn main() -> Result<()> {
                             stream
                                 .map_err(|e| pubsub::errors::ErrorKind::Message(e).into())
                                 .for_each(move |message| handle.route(message))
-                                .map_err(|_| ())
+                                .map_err(|e| error!("{}", e))
                         }));
 
                         // Finally, add the newbie to the list of existing publishers
