@@ -1,0 +1,14 @@
+[package]
+name = "generators"
+version = "0.1.0"
+authors = ["Pete Hayes <pete@hayes.id.au>"]
+edition = "2018"
+
+[dependencies]
+atomic-counter = "1.0"
+client = { path = "../client" }
+futures = "0.1"
+message = { path = "../message" }
+pattern-matcher = { path = "../pattern-matcher" }
+rand = "0.7"
+tokio = "0.1"
