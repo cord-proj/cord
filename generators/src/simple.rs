@@ -1,10 +1,6 @@
-use super::Client;
-use super::{DecoratedStream, Factory};
-use client::{errors::Error, Conn};
-use futures::{
-    future::{self},
-    Future, Stream,
-};
+use super::{Client, Factory, MessageStream, CONSUMERS_PER_CLIENT};
+use client::errors::{Error, ErrorKind};
+use futures::{Future, Stream};
 use message::Message;
 use pattern_matcher::Pattern;
 use rand::{self, rngs::ThreadRng, Rng};
@@ -14,73 +10,96 @@ use tokio::prelude::Async;
 const MESSAGE: &str = "message";
 const NAMESPACE_LENGTH: u8 = 5;
 
-pub struct SimpleFactory;
+pub struct SimpleFactory {
+    seed: Vec<char>,
+    rng: ThreadRng,
+    consumers_per_client: u32,
+    provider_ns: Vec<Pattern>,
+    subscriber_ns: Vec<Pattern>,
+}
 
 struct SimpleProducer {
     namespace: Pattern,
     message: String,
 }
 
-impl Factory for SimpleFactory {
-    fn generate<F>(
-        self,
-        server_addr: SocketAddr,
-        num_clients: u32,
-        consumers_per_client: u32,
-        num_messages: Option<u64>,
-        decorator: F,
-    ) -> Vec<Box<dyn Future<Item = Client, Error = Error>>>
-    where
-        F: Fn(DecoratedStream) -> DecoratedStream + 'static,
-    {
+impl SimpleFactory {
+    fn gen_namespace(&mut self) -> Pattern {
+        let seed_len = self.seed.len();
+        let mut nsbuf = vec!['/'];
+        for _ in 0..NAMESPACE_LENGTH {
+            nsbuf.push(self.seed[self.rng.gen_range(0, seed_len)]);
+        }
+
+        let ns: String = nsbuf.into_iter().collect();
+        ns.into()
+    }
+}
+
+impl Default for SimpleFactory {
+    fn default() -> Self {
         // Create seed data for namespace generation
         let seed = (b'A'..=b'z')
             .map(|c| c as char)
             .filter(|c| c.is_alphabetic())
             .collect::<Vec<_>>();
 
-        let mut rng = rand::thread_rng();
-        let mut namespaces = Vec::new();
+        Self {
+            seed,
+            rng: rand::thread_rng(),
+            consumers_per_client: CONSUMERS_PER_CLIENT,
+            provider_ns: Vec::new(),
+            subscriber_ns: Vec::new(),
+        }
+    }
+}
 
-        // Generate namespaces
-        for _ in 0..num_clients {
-            namespaces.push(gen_namespace(&mut rng, &seed));
+impl Factory for SimpleFactory {
+    fn new_client<F>(&mut self, addr: SocketAddr, decorator: F) -> Client
+    where
+        F: Fn(MessageStream) -> MessageStream + 'static,
+    {
+        let provider_ns = self
+            .provider_ns
+            .pop()
+            .unwrap_or_else(|| self.gen_namespace());
+        let subscriber_ns = Vec::new();
+
+        // The subscriber buffer should only ever contain as many namespaces as
+        // there are consumers.
+        if self.subscriber_ns.len() == self.consumers_per_client as usize {
+            self.subscriber_ns.remove(0);
         }
 
-        let mut clients: Vec<Box<dyn Future<Item = Client, Error = Error>>> = Vec::new();
-        for namespace in namespaces.iter() {
-            let namespaces_c = namespaces.clone();
-            let namespace_c = namespace.clone();
-            clients.push(Box::new(Conn::new(server_addr).map(move |conn| {
-                let subs = namespaces_c
-                    .iter()
-                    .filter(|n| *n != &namespace_c)
-                    .cloned()
-                    .collect();
-
-                Client::new(
-                    conn,
-                    namespace_c.clone(),
-                    decorator(Box::new(SimpleProducer::new(namespace_c, MESSAGE))),
-                    subs,
-                    |sub| {
-                        Box::new(
-                            sub.fold(0, |acc, _| Ok::<_, Error>(acc + 1))
-                                .and_then(|acc| {
-                                    if acc == 1 {
-                                        future::ok(())
-                                    } else {
-                                        future::err("ABC".into())
-                                    }
-                                }),
-                        )
-                    },
+        // Now that we are providing provider_ns, the next client can subscribe
+        // to it.
+        self.subscriber_ns.push(provider_ns.clone());
+        Client::new(
+            addr,
+            provider_ns.clone(),
+            decorator(Box::new(SimpleProducer::new(provider_ns, MESSAGE))),
+            subscriber_ns,
+            |subscriber| {
+                Box::new(
+                    subscriber
+                        .fold(0, |acc, _| Ok::<_, Error>(acc + 1))
+                        .and_then(|acc| {
+                            if acc == 1 {
+                                Ok(())
+                            } else {
+                                Err(Error::from_kind(ErrorKind::Msg(format!(
+                                    "Expected to receive {} messages, got {}",
+                                    1, acc
+                                ))))
+                            }
+                        }),
                 )
-                .unwrap()
-            })))
-        }
+            },
+        )
+    }
 
-        clients
+    fn set_consumers_per_client(&mut self, consumers_per_client: u32) {
+        self.consumers_per_client = consumers_per_client;
     }
 }
 
@@ -103,15 +122,4 @@ impl Stream for SimpleProducer {
             self.message.clone(),
         ))))
     }
-}
-
-fn gen_namespace(rng: &mut ThreadRng, seed: &[char]) -> Pattern {
-    let seed_len = seed.len();
-    let mut nsbuf = vec!['/'];
-    for _ in 0..NAMESPACE_LENGTH {
-        nsbuf.push(seed[rng.gen_range(0, seed_len)]);
-    }
-
-    let ns: String = nsbuf.into_iter().collect();
-    ns.into()
 }
