@@ -11,8 +11,8 @@ pub enum Subscriber {
     // @todo Replace trait object with impl Trait once stabilised:
     // https://github.com/rust-lang/rust/issues/34511
     // Task(Box<FnMut(Message, PublisherHandle) -> impl Future<Item=(), Error=()>>)
-    Task(Box<FnMut(Message) -> SomeFuture + Send>),
-    OnetimeTask(Option<Box<FnOnce(Message) -> SomeFuture + Send>>),
+    Task(Box<dyn FnMut(Message) -> SomeFuture + Send>),
+    OnetimeTask(Option<Box<dyn FnOnce(Message) -> SomeFuture + Send>>),
 }
 
 impl Subscriber {
