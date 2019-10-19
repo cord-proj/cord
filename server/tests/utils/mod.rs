@@ -1,18 +1,22 @@
 use std::{
     env,
     io::Read,
+    net::SocketAddr,
     panic,
     path::PathBuf,
     process::{Child, Command, Stdio},
     str,
 };
 
-pub fn run_client<F: FnOnce(u16) + panic::UnwindSafe>(f: F) {
+pub fn run_client<F: FnOnce(SocketAddr) + panic::UnwindSafe>(f: F) {
     // Start a new server process
     let (mut server, port) = start_server();
 
+    // Convert the port into a SocketAddr to be friendly to the caller
+    let socket_addr = format!("127.0.0.1:{}", port).parse().unwrap();
+
     // Catch panics to ensure that we have the opportunity to terminate the server
-    let result = panic::catch_unwind(|| f(port));
+    let result = panic::catch_unwind(|| f(socket_addr));
 
     // Terminate the server
     server.kill().expect("Server was not running");

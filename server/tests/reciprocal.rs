@@ -12,9 +12,9 @@ use std::{
 
 #[test]
 fn test_reciprocal() {
-    let f = |port| {
+    let f = |socket_addr| {
         let (tx, mut rx1) = oneshot::channel();
-        let client1 = Conn::new(format!("127.0.0.1:{}", port).parse().unwrap())
+        let client1 = Conn::new(socket_addr)
             .map_err(|e| panic!("{}", e))
             .and_then(|mut conn| {
                 conn.provide("/users".into()).unwrap();
@@ -35,7 +35,7 @@ fn test_reciprocal() {
             });
 
         let (tx, mut rx2) = oneshot::channel();
-        let client2 = Conn::new(format!("127.0.0.1:{}", port).parse().unwrap())
+        let client2 = Conn::new(socket_addr)
             .map_err(|e| panic!("{}", e))
             .and_then(|mut conn| {
                 conn.provide("/groups".into()).unwrap();
