@@ -1,3 +1,4 @@
+use env_logger;
 use std::{
     env,
     io::Read,
@@ -7,6 +8,12 @@ use std::{
     process::{Child, Command, Stdio},
     str,
 };
+
+// Start the env_logger instance
+#[allow(dead_code)]
+pub fn init_log() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
 
 pub fn run_client<F: FnOnce(SocketAddr) + panic::UnwindSafe>(f: F) {
     // Start a new server process

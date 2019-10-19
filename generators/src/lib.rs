@@ -2,9 +2,10 @@ pub use simple::SimpleFactory;
 
 use client::{errors::Error, Conn, Subscriber};
 use futures::{future, Future, Poll, Stream};
+use log::info;
 use message::Message;
 use pattern_matcher::Pattern;
-use std::{net::SocketAddr, time::Duration};
+use std::{fmt, net::SocketAddr, result, time::Duration};
 use stream::{delay, take_for};
 use tokio;
 
@@ -21,6 +22,7 @@ pub trait Factory {
     fn new_client<F>(&mut self, addr: SocketAddr, decorator: F) -> Client
     where
         F: Fn(MessageStream) -> MessageStream + 'static;
+    fn get_consumers_per_client(&self) -> u32;
     fn set_consumers_per_client(&mut self, consumers_per_client: u32);
 }
 
@@ -124,6 +126,35 @@ where
     }
 }
 
+impl<F> fmt::Display for Executor<F>
+where
+    F: Factory + Send,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        let time = if let Some(duration) = self.duration {
+            format!("for {:?}", duration)
+        } else if let Some(messages) = self.num_messages {
+            format!("{} times", messages)
+        } else {
+            unreachable!();
+        };
+
+        let duration = if let Some(frequency) = self.frequency {
+            format!(" every {:?}", frequency)
+        } else {
+            "".into()
+        };
+        write!(
+            f,
+            "Testing {} clients with {} consumers each, sending messages{} {}",
+            self.num_clients,
+            self.factory.get_consumers_per_client(),
+            duration,
+            time
+        )
+    }
+}
+
 impl Client {
     fn new<F>(
         addr: SocketAddr,
@@ -133,19 +164,27 @@ impl Client {
         accumulator: F,
     ) -> Client
     where
-        F: Fn(Subscriber) -> Box<dyn Future<Item = (), Error = Error> + Send> + Send + 'static,
+        F: Fn(Subscriber, Pattern) -> Box<dyn Future<Item = (), Error = Error> + Send>
+            + Send
+            + 'static,
     {
         let fut = Conn::new(addr).and_then(move |mut conn| {
+            info!(
+                "Conn({}) providing namespace {:?}",
+                addr, provider_namespace
+            );
             conn.provide(provider_namespace)
                 .expect("Cannot send PROVIDE message to server");
             let mut futs = vec![];
             for n in subscribe_namespaces {
+                info!("Conn({}) subscribing to namespace {:?}", addr, n);
                 futs.push(accumulator(
-                    conn.subscribe(n)
+                    conn.subscribe(n.clone())
                         .expect("Cannot send SUBSCRIBE message to server"),
+                    n,
                 ));
             }
-            tokio::spawn(conn.forward(producer).map(|_| ()).map_err(|_| ()));
+            tokio::spawn(conn.forward(producer).map(|_| ()).map_err(|e| panic!(e)));
             future::join_all(futs).map(|_| ())
         });
 

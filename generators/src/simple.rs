@@ -1,6 +1,7 @@
 use super::{Client, Factory, MessageStream, CONSUMERS_PER_CLIENT};
 use client::errors::Error;
 use futures::{Future, Stream};
+use log::{debug, error, info};
 use message::Message;
 use pattern_matcher::Pattern;
 use rand::{self, Rng};
@@ -108,22 +109,38 @@ impl Factory for SimpleFactory {
                 counter.clone(),
             ))),
             subscriber_ns,
-            move |subscriber| {
+            move |subscriber, namespace| {
                 let c = counter.clone();
+                let namespace_c = namespace.clone();
                 Box::new(
                     subscriber
-                        .fold(0, |acc, _| Ok::<_, Error>(acc + 1))
+                        .fold(0, move |acc, _| {
+                            debug!("Subscriber {:?} received message {}", namespace_c, acc + 1);
+                            Ok::<_, Error>(acc + 1)
+                        })
                         .and_then(move |acc| {
-                            if acc == c.load(Ordering::Relaxed) {
+                            let sent = c.load(Ordering::Relaxed);
+                            if acc == sent {
+                                info!("Subscriber {:?} received all {} messages", namespace, acc);
                                 Ok(())
                             } else {
-                                Err(format!("Expected to receive {} messages, got {}", 1, acc)
-                                    .into())
+                                error!(
+                                    "Subscriber {:?} only received {} of {} messages",
+                                    namespace, acc, sent
+                                );
+                                Err(
+                                    format!("Expected to receive {} messages, got {}", sent, acc)
+                                        .into(),
+                                )
                             }
                         }),
                 )
             },
         )
+    }
+
+    fn get_consumers_per_client(&self) -> u32 {
+        self.consumers_per_client
     }
 
     fn set_consumers_per_client(&mut self, consumers_per_client: u32) {
@@ -151,7 +168,8 @@ impl Stream for SimpleProducer {
 
     fn poll(&mut self) -> result::Result<Async<Option<Self::Item>>, Self::Error> {
         // Increment the message count for later comparison
-        self.msg_count.fetch_add(1, Ordering::Relaxed);
+        let prev = self.msg_count.fetch_add(1, Ordering::Relaxed);
+        debug!("Producer {:?} sending message {}", self.namespace, prev + 1);
         Ok(Async::Ready(Some(Message::Event(
             self.namespace.clone(),
             self.message.clone(),

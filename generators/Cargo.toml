@@ -5,9 +5,9 @@ authors = ["Pete Hayes <pete@hayes.id.au>"]
 edition = "2018"
 
 [dependencies]
-atomic-counter = "1.0"
 client = { path = "../client" }
 futures = "0.1"
+log = "0.4"
 message = { path = "../message" }
 pattern-matcher = { path = "../pattern-matcher" }
 rand = "0.7"
