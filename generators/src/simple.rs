@@ -3,7 +3,7 @@ use client::errors::Error;
 use futures::{Future, Stream};
 use message::Message;
 use pattern_matcher::Pattern;
-use rand::{self, rngs::ThreadRng, Rng};
+use rand::{self, Rng};
 use std::{
     net::SocketAddr,
     result,
@@ -19,7 +19,6 @@ const NAMESPACE_LENGTH: u8 = 5;
 
 pub struct SimpleFactory {
     seed: Vec<char>,
-    rng: ThreadRng,
     consumers_per_client: u32,
     provider_ns: Vec<Pattern>,
     subscriber_ns: Vec<Pattern>,
@@ -36,7 +35,9 @@ impl SimpleFactory {
         let seed_len = self.seed.len();
         let mut nsbuf = vec!['/'];
         for _ in 0..NAMESPACE_LENGTH {
-            nsbuf.push(self.seed[self.rng.gen_range(0, seed_len)]);
+            // XXX `rand::thread_rng()` should be cached somehow, but isn't Sendable so
+            // we can't include it in the SimpleFactory struct.
+            nsbuf.push(self.seed[rand::thread_rng().gen_range(0, seed_len)]);
         }
 
         let ns: String = nsbuf.into_iter().collect();
@@ -54,7 +55,6 @@ impl Default for SimpleFactory {
 
         Self {
             seed,
-            rng: rand::thread_rng(),
             consumers_per_client: CONSUMERS_PER_CLIENT,
             provider_ns: Vec::new(),
             subscriber_ns: Vec::new(),

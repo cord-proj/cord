@@ -1,10 +1,7 @@
 pub use simple::SimpleFactory;
 
 use client::{errors::Error, Conn, Subscriber};
-use futures::{
-    future::{self, FutureResult},
-    Future, Poll, Stream,
-};
+use futures::{future, Future, Poll, Stream};
 use message::Message;
 use pattern_matcher::Pattern;
 use std::{net::SocketAddr, time::Duration};
@@ -40,7 +37,7 @@ where
 }
 
 pub struct Client {
-    inner: Box<dyn Future<Item = (), Error = Error>>,
+    inner: Box<dyn Future<Item = (), Error = Error> + Send>,
 }
 
 impl<F> Executor<F>
@@ -91,7 +88,7 @@ where
     }
 
     /// Run test executor
-    pub fn exec(mut self) -> FutureResult<impl Future<Item = (), Error = Error>, Error> {
+    pub fn exec(mut self) -> impl Future<Item = (), Error = Error> {
         // Destructure self so members can be copied across threads
         let frequency = self.frequency;
         let duration = self.duration;
@@ -123,7 +120,7 @@ where
             );
         }
 
-        future::ok(future::join_all(futs).map(|_| ()))
+        future::join_all(futs).map(|_| ())
     }
 }
 
@@ -136,12 +133,11 @@ impl Client {
         accumulator: F,
     ) -> Client
     where
-        F: Fn(Subscriber) -> Box<dyn Future<Item = (), Error = Error>> + 'static,
+        F: Fn(Subscriber) -> Box<dyn Future<Item = (), Error = Error> + Send> + Send + 'static,
     {
         let fut = Conn::new(addr).and_then(move |mut conn| {
             conn.provide(provider_namespace)
                 .expect("Cannot send PROVIDE message to server");
-
             let mut futs = vec![];
             for n in subscribe_namespaces {
                 futs.push(accumulator(
@@ -149,9 +145,7 @@ impl Client {
                         .expect("Cannot send SUBSCRIBE message to server"),
                 ));
             }
-
             tokio::spawn(conn.forward(producer).map(|_| ()).map_err(|_| ()));
-
             future::join_all(futs).map(|_| ())
         });
 
