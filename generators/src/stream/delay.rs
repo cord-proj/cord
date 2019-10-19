@@ -1,6 +1,9 @@
-use futures::{Sink, Stream};
+use futures::{Future, Sink, Stream};
 use std::time::{Duration, Instant};
-use tokio::prelude::{Async, AsyncSink};
+use tokio::{
+    prelude::{Async, AsyncSink},
+    timer,
+};
 
 /// Stream combinator that delays each Stream::Item by a given duration.
 pub struct Delay<S>
@@ -8,18 +11,18 @@ where
     S: Stream,
 {
     stream: S,
-    now: Instant,
-    delay: Duration,
+    duration: Duration,
+    delay: Option<timer::Delay>,
 }
 
-pub fn new<S>(stream: S, delay: Duration) -> Delay<S>
+pub fn new<S>(stream: S, duration: Duration) -> Delay<S>
 where
     S: Stream,
 {
     Delay {
         stream,
-        now: Instant::now(),
-        delay,
+        duration,
+        delay: None,
     }
 }
 
@@ -49,17 +52,24 @@ where
 impl<S> Stream for Delay<S>
 where
     S: Stream,
+    S::Error: From<String>,
 {
     type Item = S::Item;
     type Error = S::Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
-        // If we have not waited long enough, don't return a message
-        if self.now.elapsed() < self.delay {
-            Ok(Async::NotReady)
-        } else {
-            self.now = Instant::now();
-            self.stream.poll()
+        let duration = self.duration;
+        let delay = self
+            .delay
+            .get_or_insert_with(|| timer::Delay::new(Instant::now() + duration));
+
+        match delay.poll() {
+            Ok(Async::Ready(_)) => {
+                self.delay = None;
+                self.stream.poll()
+            }
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Err(e) => Err(format!("{}", e).into()),
         }
     }
 }
