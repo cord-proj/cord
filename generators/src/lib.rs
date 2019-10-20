@@ -1,11 +1,20 @@
 pub use simple::SimpleFactory;
 
-use client::{errors::Error, Conn, Subscriber};
+use client::{errors::Error, Conn};
 use futures::{future, Future, Poll, Stream};
-use log::info;
+use log::{error, info};
 use message::Message;
 use pattern_matcher::Pattern;
-use std::{fmt, net::SocketAddr, result, time::Duration};
+use std::{
+    fmt,
+    net::SocketAddr,
+    result,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use stream::{delay, take_for};
 use tokio;
 
@@ -70,8 +79,8 @@ where
     }
 
     /// Set how frequently the data stream will produce messages
-    pub fn set_frequency(&mut self, delay: Duration) -> &mut Self {
-        self.frequency = Some(delay);
+    pub fn set_frequency(&mut self, delay: Option<Duration>) -> &mut Self {
+        self.frequency = delay;
         self
     }
 
@@ -164,10 +173,16 @@ impl Client {
         accumulator: F,
     ) -> Client
     where
-        F: Fn(Subscriber, Pattern) -> Box<dyn Future<Item = (), Error = Error> + Send>
+        F: Fn(
+                Box<dyn Stream<Item = (Pattern, String), Error = Error> + Send>,
+                Pattern,
+            ) -> Box<dyn Future<Item = (), Error = Error> + Send>
             + Send
             + 'static,
     {
+        // Setup detonator to shutdown subscribers
+        let detonator = Arc::new(AtomicBool::new(true));
+        let det_c = detonator.clone();
         let fut = Conn::new(addr).and_then(move |mut conn| {
             info!(
                 "Conn({}) providing namespace {:?}",
@@ -177,14 +192,28 @@ impl Client {
                 .expect("Cannot send PROVIDE message to server");
             let mut futs = vec![];
             for n in subscribe_namespaces {
+                // XXX This is a super ugly approach. If only I had a brain...
+                let det_c_c = det_c.clone();
                 info!("Conn({}) subscribing to namespace {:?}", addr, n);
                 futs.push(accumulator(
-                    conn.subscribe(n.clone())
-                        .expect("Cannot send SUBSCRIBE message to server"),
+                    Box::new(
+                        conn.subscribe(n.clone())
+                            .expect("Cannot send SUBSCRIBE message to server")
+                            .take_while(move |_| Ok(det_c_c.load(Ordering::Relaxed))),
+                    ),
                     n,
                 ));
             }
-            tokio::spawn(conn.forward(producer).map(|_| ()).map_err(|e| panic!(e)));
+
+            tokio::spawn(
+                conn.forward(producer)
+                    .and_then(move |_| {
+                        detonator.store(false, Ordering::Relaxed);
+                        Ok(())
+                    })
+                    .map_err(|e| error!("{}", e)),
+            );
+
             future::join_all(futs).map(|_| ())
         });
 

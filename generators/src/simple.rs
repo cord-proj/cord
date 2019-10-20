@@ -128,10 +128,11 @@ impl Factory for SimpleFactory {
                                     "Subscriber {:?} only received {} of {} messages",
                                     namespace, acc, sent
                                 );
-                                Err(
-                                    format!("Expected to receive {} messages, got {}", sent, acc)
-                                        .into(),
+                                Err(format!(
+                                    "Subscriber {:?} only received {} of {} messages",
+                                    namespace, acc, sent
                                 )
+                                .into())
                             }
                         }),
                 )
