@@ -1,0 +1,15 @@
+max_width = 100
+# wrap_comments = true
+# format_code_in_doc_comments = true
+# comment_width = 80
+# format_strings = true
+# merge_imports = true
+reorder_imports = true
+reorder_modules = true
+# reorder_impl_items = true
+# space_before_colon = true
+# space_after_colon = true
+# spaces_around_ranges = true
+# trailing_semicolon = true
+edition = "2018"
+use_try_shorthand = true
