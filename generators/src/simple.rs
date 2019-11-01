@@ -21,8 +21,8 @@ const NAMESPACE_LENGTH: u8 = 5;
 pub struct SimpleFactory {
     seed: Vec<char>,
     consumers_per_client: u32,
-    provider_ns: Vec<Pattern>,
-    subscriber_ns: Vec<Pattern>,
+    provider_ns: Vec<(Pattern, Arc<AtomicU64>)>,
+    subscriber_ns: Vec<(Pattern, Arc<AtomicU64>)>,
 }
 
 struct SimpleProducer {
@@ -68,23 +68,36 @@ impl Factory for SimpleFactory {
     where
         F: Fn(MessageStream) -> MessageStream + 'static,
     {
-        // Get or generate the provider namespace for this client
-        let provider_ns = self
+        // Get or generate the provider namespace and counter for this client.
+        // The counter is used to determine how many messages were sent vs. how
+        // many messages were received.
+        let (provider_ns, counter) = self
             .provider_ns
             .pop()
-            .unwrap_or_else(|| self.gen_namespace());
+            .unwrap_or_else(|| (self.gen_namespace(), Arc::new(AtomicU64::new(0))));
 
         // Get or generate the subscriber namespaces for this client
         let mut subscriber_ns = self.subscriber_ns.clone();
+
         // We need a namespace per consumer. If `subscriber_ns` is not full,
         // top it up with new namespaces.
         for _ in subscriber_ns.len()..self.consumers_per_client as usize {
             let ns = self.gen_namespace();
+            let c = Arc::new(AtomicU64::new(0));
             // For any new namespace we subscribe to, we also need a provider.
             // Thus we add every new namespace to the "needs provider" list.
-            self.provider_ns.push(ns.clone());
-            subscriber_ns.push(ns);
+            self.provider_ns.push((ns.clone(), c.clone()));
+            subscriber_ns.push((ns, c));
         }
+
+        info!(
+            "Create new Client that provides {:?} and subscribes to {:?}",
+            provider_ns,
+            subscriber_ns
+                .iter()
+                .map(|s| &s.0)
+                .collect::<Vec<&Pattern>>()
+        );
 
         // The subscriber buffer should only ever contain as many namespaces as
         // there are consumers.
@@ -94,11 +107,8 @@ impl Factory for SimpleFactory {
 
         // Now that we are providing provider_ns, the next client can subscribe
         // to it.
-        self.subscriber_ns.push(provider_ns.clone());
-
-        // Setup our atomic message counter to compare what we sent and what we
-        // received.
-        let counter = Arc::new(AtomicU64::new(0));
+        self.subscriber_ns
+            .push((provider_ns.clone(), counter.clone()));
 
         Client::new(
             addr,
@@ -109,31 +119,25 @@ impl Factory for SimpleFactory {
                 counter.clone(),
             ))),
             subscriber_ns,
-            move |subscriber, namespace| {
-                let c = counter.clone();
+            move |subscriber, namespace, counter| {
                 let namespace_c = namespace.clone();
                 Box::new(
                     subscriber
-                        .fold(0, move |acc, _| {
+                        .fold(counter.load(Ordering::Relaxed), move |acc, _| {
                             debug!("Subscriber {:?} received message {}", namespace_c, acc + 1);
                             Ok::<_, Error>(acc + 1)
                         })
                         .and_then(move |acc| {
-                            let sent = c.load(Ordering::Relaxed);
+                            let sent = counter.load(Ordering::Relaxed);
                             if acc == sent {
                                 info!("Subscriber {:?} received all {} messages", namespace, acc);
-                                Ok(())
                             } else {
                                 error!(
                                     "Subscriber {:?} only received {} of {} messages",
                                     namespace, acc, sent
                                 );
-                                Err(format!(
-                                    "Subscriber {:?} only received {} of {} messages",
-                                    namespace, acc, sent
-                                )
-                                .into())
                             }
+                            Ok(())
                         }),
                 )
             },

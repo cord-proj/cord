@@ -139,8 +139,7 @@ mod tests {
             Box::new(future::ok(()))
         }));
         RUNTIME.lock().unwrap().block_on(future::lazy(move || {
-            consumer.recv(message);
-            future::ok(())
+            consumer.recv(message).1.map_err(|_| ())
         }));
         assert_eq!(rx.try_recv().unwrap(), message_c);
 
@@ -160,8 +159,7 @@ mod tests {
             Box::new(future::ok(()))
         })));
         RUNTIME.lock().unwrap().block_on(future::lazy(move || {
-            consumer.recv(message);
-            future::ok(())
+            consumer.recv(message).1.map_err(|_| ())
         }));
         assert_eq!(rx.try_recv().unwrap(), message_c);
 

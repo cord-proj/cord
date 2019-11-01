@@ -2,20 +2,17 @@ pub use simple::SimpleFactory;
 
 use client::{errors::Error, Conn};
 use futures::{future, Future, Poll, Stream};
-use log::{error, info};
+use log::{debug, error, info};
 use message::Message;
 use pattern_matcher::Pattern;
 use std::{
     fmt,
     net::SocketAddr,
     result,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicU64, Arc},
     time::Duration,
 };
-use stream::{delay, take_for};
+use stream::{delay, interruptable::Interrupt, take_for};
 use tokio;
 
 mod simple;
@@ -24,6 +21,7 @@ mod stream;
 const NUM_CLIENTS: u32 = 5;
 const CONSUMERS_PER_CLIENT: u32 = 2;
 const NUM_MESSAGES: u64 = 100;
+const TERMINATION_GRACE: u64 = 1000; // in milliseconds
 
 type MessageStream = Box<dyn Stream<Item = Message, Error = Error> + Send>;
 
@@ -169,47 +167,54 @@ impl Client {
         addr: SocketAddr,
         provider_namespace: Pattern,
         producer: MessageStream,
-        subscribe_namespaces: Vec<Pattern>,
+        subscribe_namespaces: Vec<(Pattern, Arc<AtomicU64>)>,
         accumulator: F,
     ) -> Client
     where
         F: Fn(
                 Box<dyn Stream<Item = (Pattern, String), Error = Error> + Send>,
                 Pattern,
+                Arc<AtomicU64>,
             ) -> Box<dyn Future<Item = (), Error = Error> + Send>
             + Send
             + 'static,
     {
-        // Setup detonator to shutdown subscribers
-        let detonator = Arc::new(AtomicBool::new(true));
-        let det_c = detonator.clone();
+        // Setup interrupt to terminate subscribers after producer is finished.
+        let interrupt = Interrupt::new();
+
+        // Connect to the server and start sending/receiving
         let fut = Conn::new(addr).and_then(move |mut conn| {
-            info!(
-                "Conn({}) providing namespace {:?}",
-                addr, provider_namespace
-            );
+            // Register the namespace we provide
+            info!("{} providing namespace {:?}", conn, provider_namespace);
             conn.provide(provider_namespace)
                 .expect("Cannot send PROVIDE message to server");
+
+            // Subscribe to foreign namespaces and run streams to exhaustion.
             let mut futs = vec![];
-            for n in subscribe_namespaces {
-                // XXX This is a super ugly approach. If only I had a brain...
-                let det_c_c = det_c.clone();
-                info!("Conn({}) subscribing to namespace {:?}", addr, n);
-                futs.push(accumulator(
-                    Box::new(
-                        conn.subscribe(n.clone())
-                            .expect("Cannot send SUBSCRIBE message to server")
-                            .take_while(move |_| Ok(det_c_c.load(Ordering::Relaxed))),
-                    ),
-                    n,
-                ));
+            for (n, c) in subscribe_namespaces {
+                // Subscribe to foreign namespace
+                info!("{} subscribing to namespace {:?}", conn, n);
+                let sub = conn
+                    .subscribe(n.clone())
+                    .expect("Cannot send SUBSCRIBE message to server");
+
+                // Attach this subscriber stream to the Interrupt
+                let interruptable = interrupt.attach(sub);
+
+                // Accumulate the stream to test results
+                let fut = accumulator(Box::new(interruptable), n, c);
+
+                // Push the accumulator future onto the heap
+                futs.push(fut);
             }
 
             tokio::spawn(
                 conn.forward(producer)
-                    .and_then(move |_| {
-                        detonator.store(false, Ordering::Relaxed);
-                        Ok(())
+                    .and_then(move |conn| {
+                        debug!("Terminating consumers for {}", conn);
+                        interrupt
+                            .after(Duration::from_millis(TERMINATION_GRACE))
+                            .map_err(|e| e.to_string().into())
                     })
                     .map_err(|e| error!("{}", e)),
             );

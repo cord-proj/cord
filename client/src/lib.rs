@@ -3,12 +3,13 @@ pub mod errors;
 use errors::{Error, ErrorKind, Result};
 use futures::{Future, Stream};
 use futures_locks::Mutex;
+use log::{debug, error};
 use message::{Codec, Message};
 use pattern_matcher::Pattern;
 use retain_mut::RetainMut;
 use tokio::{codec::Framed, net::TcpStream, prelude::Async, sync::mpsc, sync::oneshot};
 
-use std::{collections::HashMap, net::SocketAddr, ops::Drop, result, sync::Arc};
+use std::{collections::HashMap, fmt, net::SocketAddr, ops::Drop, result, sync::Arc};
 
 /// A `Conn` is used to connect to and communicate with a server.
 ///
@@ -33,6 +34,7 @@ use std::{collections::HashMap, net::SocketAddr, ops::Drop, result, sync::Arc};
 /// ```
 #[derive(Clone)]
 pub struct Conn {
+    local_addr: Option<SocketAddr>,
     sender: mpsc::UnboundedSender<Message>,
     inner: Arc<Inner>,
 }
@@ -80,6 +82,9 @@ impl Conn {
 
         TcpStream::connect(&addr)
             .map(|sock| {
+                // Get local address as unique identifier for this Conn
+                let local_addr = sock.local_addr().ok();
+
                 // Wrap socket in message codec
                 let framed = Framed::new(sock, Codec::default());
                 let (sink, stream) = framed.split();
@@ -89,7 +94,7 @@ impl Conn {
                     rx.map_err(|e| Error::from_kind(ErrorKind::ConnRecv(e)))
                         .forward(sink)
                         .map(|_| ())
-                        .map_err(|_| ()),
+                        .map_err(|e| error!("{}", e)),
                 );
 
                 // Setup the receivers map
@@ -103,10 +108,11 @@ impl Conn {
                         .for_each(move |message| route(&receivers_c, message))
                         .select(det_rx.map_err(|e| Error::from_kind(ErrorKind::Terminate(e))))
                         .map(|_| ())
-                        .map_err(|_| ()),
+                        .map_err(|(e, _)| error!("{}", e)),
                 );
 
                 Conn {
+                    local_addr,
                     sender: tx,
                     inner: Arc::new(Inner {
                         receivers,
@@ -123,10 +129,13 @@ impl Conn {
     where
         S: Stream<Item = Message, Error = Error>,
     {
+        let local_addr = self.local_addr;
         let inner = self.inner;
-        stream
-            .forward(self.sender)
-            .map(|(_, sender)| Conn { sender, inner })
+        stream.forward(self.sender).map(move |(_, sender)| Conn {
+            local_addr,
+            sender,
+            inner,
+        })
     }
 
     /// Inform the server that you will be providing a new namespace
@@ -162,7 +171,7 @@ impl Conn {
         let namespace_c = namespace.clone();
         self.sender.try_send(Message::Subscribe(namespace))?;
 
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::channel(100);
         tokio::spawn(
             self.inner
                 .receivers
@@ -173,8 +182,7 @@ impl Conn {
                         .push(tx);
                     Ok(())
                 })
-                .expect("The default executor has shut down")
-                .map(|_| ()),
+                .expect("The default executor has shut down"),
         );
         Ok(Subscriber {
             receiver: rx,
@@ -208,6 +216,17 @@ impl Conn {
     }
 }
 
+impl fmt::Display for Conn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Conn({})",
+            self.local_addr
+                .map_or("<unknown>".into(), |a| format!("{}", a))
+        )
+    }
+}
+
 fn route(
     receivers: &Mutex<HashMap<Pattern, Vec<mpsc::Sender<Message>>>>,
     message: Message,
@@ -220,13 +239,13 @@ fn route(
                 // need to store a Message, not a pattern.
                 if namespace.contains(message.namespace()) {
                     // Remove any senders that give errors when attempting to send
-                    senders.retain_mut(|tx| tx.try_send(message.clone()).is_ok());
-
-                    // XXX Awaiting stabilisation
-                    // https://github.com/rust-lang/rust/issues/43244
-                    // senders.drain_filter(|tx| {
-                    //     tx.try_send(message.clone()).is_ok()
-                    // });
+                    senders.retain_mut(|tx| {
+                        // TODO Add loop with `poll_ready()` to make sure we can actually
+                        // send before attempting.
+                        tx.try_send(message.clone())
+                            .map_err(|e| error!("{}", e))
+                            .is_ok()
+                    });
                 }
 
                 // So long as we have senders, keep the subscriber
@@ -285,6 +304,7 @@ mod tests {
         let (det_tx, _det_rx) = oneshot::channel();
 
         let conn = Conn {
+            local_addr: None,
             sender: tx,
             inner: Arc::new(Inner {
                 receivers: Mutex::new(HashMap::new()),
@@ -313,6 +333,7 @@ mod tests {
         let (det_tx, _det_rx) = oneshot::channel();
 
         let mut conn = Conn {
+            local_addr: None,
             sender: tx,
             inner: Arc::new(Inner {
                 receivers: Mutex::new(HashMap::new()),
@@ -333,6 +354,7 @@ mod tests {
         let (det_tx, _det_rx) = oneshot::channel();
 
         let mut conn = Conn {
+            local_addr: None,
             sender: tx,
             inner: Arc::new(Inner {
                 receivers: Mutex::new(HashMap::new()),
@@ -356,6 +378,7 @@ mod tests {
             Mutex::new(HashMap::new());
 
         let mut conn = Conn {
+            local_addr: None,
             sender: tx,
             inner: Arc::new(Inner {
                 receivers: receivers.clone(),
@@ -386,6 +409,7 @@ mod tests {
         let receivers = Mutex::new(receivers);
 
         let mut conn = Conn {
+            local_addr: None,
             sender: tx,
             inner: Arc::new(Inner {
                 receivers: receivers.clone(),
@@ -412,6 +436,7 @@ mod tests {
         let (det_tx, _det_rx) = oneshot::channel();
 
         let mut conn = Conn {
+            local_addr: None,
             sender: tx,
             inner: Arc::new(Inner {
                 receivers: Mutex::new(HashMap::new()),
