@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(
             Message::from_poor_mans_discriminant(
                 event.poor_mans_discriminant(),
-                pattern.clone(),
+                pattern,
                 Some(String::new())
             ),
             event
