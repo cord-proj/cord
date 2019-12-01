@@ -1,75 +1,69 @@
-use futures::{Future, Sink, Stream};
-use std::time::{Duration, Instant};
-use tokio::{
-    prelude::{Async, AsyncSink},
-    timer,
+use futures::{
+    task::{Context, Poll},
+    FutureExt, Sink, Stream,
 };
+use pin_utils::unsafe_pinned;
+use std::{pin::Pin, time::Duration};
+use tokio::time;
 
 /// Stream combinator that delays each Stream::Item by a given duration.
-pub struct Delay<S>
-where
-    S: Stream,
-{
+pub struct Delay<S> {
     stream: S,
     duration: Duration,
-    delay: Option<timer::Delay>,
+    delay: Option<time::Delay>,
 }
 
-pub fn new<S>(stream: S, duration: Duration) -> Delay<S>
-where
-    S: Stream,
-{
-    Delay {
-        stream,
-        duration,
-        delay: None,
+impl<S> Delay<S> {
+    unsafe_pinned!(stream: S);
+
+    pub(super) fn new(stream: S, duration: Duration) -> Delay<S> {
+        Delay {
+            stream,
+            duration,
+            delay: None,
+        }
     }
 }
 
-impl<S> Sink for Delay<S>
+impl<T, S> Sink<T> for Delay<S>
 where
-    S: Sink + Stream,
+    S: Sink<T>,
 {
-    type SinkItem = S::SinkItem;
-    type SinkError = S::SinkError;
+    type Error = S::Error;
 
-    fn start_send(
-        &mut self,
-        item: S::SinkItem,
-    ) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        self.stream.start_send(item)
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_ready(cx)
     }
 
-    fn poll_complete(&mut self) -> Result<Async<()>, Self::SinkError> {
-        self.stream.poll_complete()
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
+        self.as_mut().stream().start_send(item)
     }
 
-    fn close(&mut self) -> Result<Async<()>, Self::SinkError> {
-        self.stream.close()
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_flush(cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_close(cx)
     }
 }
 
 impl<S> Stream for Delay<S>
 where
     S: Stream,
-    S::Error: From<String>,
 {
     type Item = S::Item;
-    type Error = S::Error;
 
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let duration = self.duration;
-        let delay = self
-            .delay
-            .get_or_insert_with(|| timer::Delay::new(Instant::now() + duration));
+        let delay = self.delay.get_or_insert_with(|| time::delay_for(duration));
 
-        match delay.poll() {
-            Ok(Async::Ready(_)) => {
+        match delay.poll_unpin(cx) {
+            Poll::Ready(_) => {
                 self.delay = None;
-                self.stream.poll()
+                self.as_mut().stream().poll_next(cx)
             }
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(e) => Err(format!("{}", e).into()),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

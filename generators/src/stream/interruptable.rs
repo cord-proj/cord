@@ -1,17 +1,18 @@
-use futures::Future;
-use futures::{Sink, Stream};
+use futures::{
+    task::{Context, Poll},
+    Future, FutureExt, Sink, Stream,
+};
 use log::debug;
+use pin_utils::unsafe_pinned;
 use std::{
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
-use tokio::{
-    prelude::{Async, AsyncSink},
-    timer::{Delay, Error as DelayError},
-};
+use tokio::time;
 
 type Trigger = Arc<AtomicBool>;
 
@@ -19,10 +20,7 @@ type Trigger = Arc<AtomicBool>;
 pub struct Interrupt(Trigger);
 
 /// Stream combinator that terminates a stream when the trigger is pulled.
-pub struct Interruptable<S>
-where
-    S: Stream,
-{
+pub struct Interruptable<S> {
     stream: S,
     trigger: Trigger,
 }
@@ -50,35 +48,39 @@ impl Interrupt {
     }
 
     /// Interrupt the attached streams after the given duration
-    pub fn after(self, duration: Duration) -> impl Future<Item = (), Error = DelayError> {
+    pub fn after(self, duration: Duration) -> impl Future<Output = ()> {
         debug!("Terminating attached streams in {:?}", duration);
-        Delay::new(Instant::now() + duration).and_then(|_| {
+        time::delay_for(duration).then(|_| {
             self.now();
-            Ok(())
+            async {}
         })
     }
 }
 
-impl<S> Sink for Interruptable<S>
+impl<S> Interruptable<S> {
+    unsafe_pinned!(stream: S);
+}
+
+impl<S, T> Sink<T> for Interruptable<S>
 where
-    S: Sink + Stream,
+    S: Sink<T>,
 {
-    type SinkItem = S::SinkItem;
-    type SinkError = S::SinkError;
+    type Error = S::Error;
 
-    fn start_send(
-        &mut self,
-        item: S::SinkItem,
-    ) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        self.stream.start_send(item)
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_ready(cx)
     }
 
-    fn poll_complete(&mut self) -> Result<Async<()>, Self::SinkError> {
-        self.stream.poll_complete()
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
+        self.as_mut().stream().start_send(item)
     }
 
-    fn close(&mut self) -> Result<Async<()>, Self::SinkError> {
-        self.stream.close()
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_flush(cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_close(cx)
     }
 }
 
@@ -87,15 +89,14 @@ where
     S: Stream,
 {
     type Item = S::Item;
-    type Error = S::Error;
 
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         // If the AtomicBool is set to true, this stream will be terminated
         if self.trigger.load(Ordering::Relaxed) {
             debug!("Terminating stream attached to Interrupt");
-            Ok(Async::Ready(None))
+            Poll::Ready(None)
         } else {
-            self.stream.poll()
+            self.as_mut().stream().poll_next(cx)
         }
     }
 }

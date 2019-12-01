@@ -1,19 +1,21 @@
 use super::{Client, Factory, MessageStream, CONSUMERS_PER_CLIENT};
 use client::errors::Error;
-use futures::{Future, Stream};
+use futures::{
+    task::{Context, Poll},
+    Stream, TryStreamExt,
+};
 use log::{debug, error, info};
 use message::Message;
 use pattern_matcher::Pattern;
 use rand::{self, Rng};
 use std::{
     net::SocketAddr,
-    result,
+    pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
 };
-use tokio::prelude::Async;
 
 const MESSAGE: &str = "message";
 const NAMESPACE_LENGTH: u8 = 5;
@@ -169,15 +171,14 @@ impl SimpleProducer {
 
 impl Stream for SimpleProducer {
     type Item = Message;
-    type Error = Error;
 
-    fn poll(&mut self) -> result::Result<Async<Option<Self::Item>>, Self::Error> {
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context) -> Poll<Option<Self::Item>> {
         // Increment the message count for later comparison
         let prev = self.msg_count.fetch_add(1, Ordering::Relaxed);
         debug!("Producer {:?} sending message {}", self.namespace, prev + 1);
-        Ok(Async::Ready(Some(Message::Event(
+        Poll::Ready(Some(Message::Event(
             self.namespace.clone(),
             self.message.clone(),
-        ))))
+        )))
     }
 }

@@ -1,13 +1,23 @@
 pub use simple::SimpleFactory;
 
-use client::{errors::Error, Conn};
-use futures::{future, Future, Poll, Stream};
+use client::{
+    errors::{Error, Result},
+    Conn,
+};
+use futures::{
+    compat::Future01CompatExt,
+    future,
+    task::{Context, Poll},
+    Future, FutureExt, Stream, StreamExt, TryFuture, TryFutureExt, TryStream, TryStreamExt,
+};
 use log::{debug, error, info};
 use message::Message;
 use pattern_matcher::Pattern;
 use std::{
     fmt,
+    marker::Unpin,
     net::SocketAddr,
+    pin::Pin,
     result,
     sync::{atomic::AtomicU64, Arc},
     time::Duration,
@@ -23,7 +33,7 @@ const CONSUMERS_PER_CLIENT: u32 = 2;
 const NUM_MESSAGES: u64 = 100;
 const TERMINATION_GRACE: u64 = 1000; // in milliseconds
 
-type MessageStream = Box<dyn Stream<Item = Message, Error = Error> + Send>;
+type MessageStream = Box<dyn TryStream<Ok = Message, Error = Error> + Send + Unpin>;
 
 pub trait Factory {
     fn new_client<F>(&mut self, addr: SocketAddr, decorator: F) -> Client
@@ -46,7 +56,7 @@ where
 }
 
 pub struct Client {
-    inner: Box<dyn Future<Item = (), Error = Error> + Send>,
+    inner: Box<dyn TryFuture<Ok = (), Error = Error> + Send + Unpin>,
 }
 
 impl<F> Executor<F>
@@ -97,7 +107,7 @@ where
     }
 
     /// Run test executor
-    pub fn exec(mut self) -> impl Future<Item = (), Error = Error> {
+    pub fn exec(mut self) -> impl TryFuture<Ok = (), Error = Error> {
         // Destructure self so members can be copied across threads
         let frequency = self.frequency;
         let duration = self.duration;
@@ -121,7 +131,7 @@ where
                         // Decorate this stream to limit the number of messages in
                         // the stream.
                         if let Some(n) = num_messages {
-                            producer = Box::new(producer.take(n));
+                            producer = Box::new(producer.take(n as usize));
                         }
 
                         producer
@@ -172,10 +182,10 @@ impl Client {
     ) -> Client
     where
         F: Fn(
-                Box<dyn Stream<Item = (Pattern, String), Error = Error> + Send>,
+                Box<dyn Stream<Item = Result<(Pattern, String)>> + Send + Unpin>,
                 Pattern,
                 Arc<AtomicU64>,
-            ) -> Box<dyn Future<Item = (), Error = Error> + Send>
+            ) -> Box<dyn Future<Output = Result<()>> + Send + Unpin>
             + Send
             + 'static,
     {
@@ -183,7 +193,7 @@ impl Client {
         let interrupt = Interrupt::new();
 
         // Connect to the server and start sending/receiving
-        let fut = Conn::new(addr).and_then(move |mut conn| {
+        let fut = Conn::new(addr).compat().and_then(move |mut conn| {
             // Register the namespace we provide
             info!("{} providing namespace {:?}", conn, provider_namespace);
             conn.provide(provider_namespace)
@@ -228,11 +238,14 @@ impl Client {
     }
 }
 
-impl Future for Client {
-    type Item = ();
+impl TryFuture for Client {
+    type Ok = ();
     type Error = Error;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.inner.poll()
+    fn try_poll(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<result::Result<Self::Ok, Self::Error>> {
+        unsafe { Pin::map_unchecked_mut(self.as_mut(), |x| &mut x.inner).try_poll(cx) }
     }
 }

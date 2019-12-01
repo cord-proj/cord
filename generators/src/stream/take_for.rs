@@ -1,48 +1,52 @@
-use futures::{Sink, Stream};
-use std::time::{Duration, Instant};
-use tokio::prelude::{Async, AsyncSink};
+use futures::{
+    task::{Context, Poll},
+    Sink, Stream,
+};
+use pin_utils::unsafe_pinned;
+use std::{
+    pin::Pin,
+    time::{Duration, Instant},
+};
 
 /// Stream combinator that terminates a stream after a given duration.
-pub struct TakeFor<S>
-where
-    S: Stream,
-{
+pub struct TakeFor<S> {
     stream: S,
     now: Instant,
     duration: Duration,
 }
 
-pub fn new<S>(stream: S, duration: Duration) -> TakeFor<S>
-where
-    S: Stream,
-{
-    TakeFor {
-        stream,
-        now: Instant::now(),
-        duration,
+impl<S> TakeFor<S> {
+    unsafe_pinned!(stream: S);
+
+    pub fn new(stream: S, duration: Duration) -> TakeFor<S> {
+        TakeFor {
+            stream,
+            now: Instant::now(),
+            duration,
+        }
     }
 }
 
-impl<S> Sink for TakeFor<S>
+impl<S, T> Sink<T> for TakeFor<S>
 where
-    S: Sink + Stream,
+    S: Sink<T>,
 {
-    type SinkItem = S::SinkItem;
-    type SinkError = S::SinkError;
+    type Error = S::Error;
 
-    fn start_send(
-        &mut self,
-        item: S::SinkItem,
-    ) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        self.stream.start_send(item)
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_ready(cx)
     }
 
-    fn poll_complete(&mut self) -> Result<Async<()>, Self::SinkError> {
-        self.stream.poll_complete()
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
+        self.as_mut().stream().start_send(item)
     }
 
-    fn close(&mut self) -> Result<Async<()>, Self::SinkError> {
-        self.stream.close()
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_flush(cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.as_mut().stream().poll_close(cx)
     }
 }
 
@@ -51,15 +55,14 @@ where
     S: Stream,
 {
     type Item = S::Item;
-    type Error = S::Error;
 
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         // While our function has not been running for long enough, continue polling the
         // underlying stream. Otherwise, terminate the stream.
         if self.now.elapsed() < self.duration {
-            self.stream.poll()
+            self.as_mut().stream().poll_next(cx)
         } else {
-            Ok(Async::Ready(None))
+            Poll::Ready(None)
         }
     }
 }
