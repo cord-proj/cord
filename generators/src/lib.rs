@@ -5,10 +5,10 @@ use client::{
     Conn,
 };
 use futures::{
-    compat::Future01CompatExt,
+    compat::{Future01CompatExt, Stream01CompatExt},
     future,
     task::{Context, Poll},
-    Future, FutureExt, Stream, StreamExt, TryFuture, TryFutureExt, TryStream, TryStreamExt,
+    FutureExt, StreamExt, TryFuture, TryFutureExt, TryStream, TryStreamExt,
 };
 use log::{debug, error, info};
 use message::Message;
@@ -22,7 +22,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
     time::Duration,
 };
-use stream::{delay, interruptable::Interrupt, take_for};
+use stream::{delay::Delay, interruptable::Interrupt, take_for::TakeFor};
 use tokio;
 
 mod simple;
@@ -120,12 +120,12 @@ where
                     .new_client(self.server_addr, move |mut producer| {
                         // Decorate this stream to set message frequency
                         if let Some(f) = frequency {
-                            producer = Box::new(delay::new(producer, f));
+                            producer = Box::new(Delay::new(producer, f));
                         }
 
                         // Decorate this stream to limit the stream's duration
                         if let Some(d) = duration {
-                            producer = Box::new(take_for::new(producer, d));
+                            producer = Box::new(TakeFor::new(producer, d));
                         }
 
                         // Decorate this stream to limit the number of messages in
@@ -139,7 +139,7 @@ where
             );
         }
 
-        future::join_all(futs).map(|_| ())
+        future::try_join_all(futs).map_ok(|_| ())
     }
 }
 
@@ -182,10 +182,10 @@ impl Client {
     ) -> Client
     where
         F: Fn(
-                Box<dyn Stream<Item = Result<(Pattern, String)>> + Send + Unpin>,
+                Box<dyn TryStream<Ok = (Pattern, String), Error = Error> + Send + Unpin>,
                 Pattern,
                 Arc<AtomicU64>,
-            ) -> Box<dyn Future<Output = Result<()>> + Send + Unpin>
+            ) -> Box<dyn TryFuture<Ok = (), Error = Error> + Send + Unpin>
             + Send
             + 'static,
     {
@@ -206,7 +206,8 @@ impl Client {
                 info!("{} subscribing to namespace {:?}", conn, n);
                 let sub = conn
                     .subscribe(n.clone())
-                    .expect("Cannot send SUBSCRIBE message to server");
+                    .expect("Cannot send SUBSCRIBE message to server")
+                    .compat();
 
                 // Attach this subscriber stream to the Interrupt
                 let interruptable = interrupt.attach(sub);
@@ -220,16 +221,17 @@ impl Client {
 
             tokio::spawn(
                 conn.forward(producer)
+                    .compat()
                     .and_then(move |conn| {
                         debug!("Terminating consumers for {}", conn);
                         interrupt
                             .after(Duration::from_millis(TERMINATION_GRACE))
-                            .map_err(|e| e.to_string().into())
+                            .map(|x| Ok(x))
                     })
                     .map_err(|e| error!("{}", e)),
             );
 
-            future::join_all(futs).map(|_| ())
+            future::try_join_all(futs).map_ok(|_| ())
         });
 
         Client {

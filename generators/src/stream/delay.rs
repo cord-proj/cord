@@ -16,7 +16,7 @@ pub struct Delay<S> {
 impl<S> Delay<S> {
     unsafe_pinned!(stream: S);
 
-    pub(super) fn new(stream: S, duration: Duration) -> Delay<S> {
+    pub fn new(stream: S, duration: Duration) -> Delay<S> {
         Delay {
             stream,
             duration,
