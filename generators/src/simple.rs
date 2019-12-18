@@ -2,7 +2,7 @@ use super::{Client, Factory, MessageStream, CONSUMERS_PER_CLIENT};
 use client::errors::Error;
 use futures::{
     task::{Context, Poll},
-    Stream, TryStreamExt,
+    Stream, TryFutureExt, TryStreamExt,
 };
 use log::{debug, error, info};
 use message::Message;
@@ -125,21 +125,29 @@ impl Factory for SimpleFactory {
                 let namespace_c = namespace.clone();
                 Box::new(
                     subscriber
-                        .fold(counter.load(Ordering::Relaxed), move |acc, _| {
-                            debug!("Subscriber {:?} received message {}", namespace_c, acc + 1);
-                            Ok::<_, Error>(acc + 1)
-                        })
-                        .and_then(move |acc| {
-                            let sent = counter.load(Ordering::Relaxed);
-                            if acc == sent {
-                                info!("Subscriber {:?} received all {} messages", namespace, acc);
-                            } else {
-                                error!(
-                                    "Subscriber {:?} only received {} of {} messages",
-                                    namespace, acc, sent
-                                );
+                        .try_fold(counter.load(Ordering::Relaxed), |acc, _| {
+                            async move {
+                                debug!("Subscriber {:?} received message {}", namespace_c, acc + 1);
+                                Ok(acc + 1)
                             }
-                            Ok(())
+                        })
+                        .and_then(|acc| {
+                            async move {
+                                let sent = counter.load(Ordering::Relaxed);
+                                if acc == sent {
+                                    info!(
+                                        "Subscriber {:?} received all {} messages",
+                                        namespace, acc
+                                    );
+                                } else {
+                                    error!(
+                                        "Subscriber {:?} only received {} of {} messages",
+                                        namespace, acc, sent
+                                    );
+                                }
+
+                                Ok(())
+                            }
                         }),
                 )
             },
@@ -170,15 +178,15 @@ impl SimpleProducer {
 }
 
 impl Stream for SimpleProducer {
-    type Item = Message;
+    type Item = Result<Message, Error>;
 
     fn poll_next(self: Pin<&mut Self>, _: &mut Context) -> Poll<Option<Self::Item>> {
         // Increment the message count for later comparison
         let prev = self.msg_count.fetch_add(1, Ordering::Relaxed);
         debug!("Producer {:?} sending message {}", self.namespace, prev + 1);
-        Poll::Ready(Some(Message::Event(
+        Poll::Ready(Some(Ok(Message::Event(
             self.namespace.clone(),
             self.message.clone(),
-        )))
+        ))))
     }
 }

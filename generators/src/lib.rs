@@ -1,14 +1,11 @@
 pub use simple::SimpleFactory;
 
-use client::{
-    errors::{Error, Result},
-    Conn,
-};
+use client::{errors::Error, Conn};
 use futures::{
-    compat::{Future01CompatExt, Stream01CompatExt},
+    compat::{Compat, Future01CompatExt, Stream01CompatExt},
     future,
     task::{Context, Poll},
-    FutureExt, StreamExt, TryFuture, TryFutureExt, TryStream, TryStreamExt,
+    Future, FutureExt, Stream, StreamExt, TryFuture, TryFutureExt,
 };
 use log::{debug, error, info};
 use message::Message;
@@ -23,7 +20,6 @@ use std::{
     time::Duration,
 };
 use stream::{delay::Delay, interruptable::Interrupt, take_for::TakeFor};
-use tokio;
 
 mod simple;
 mod stream;
@@ -33,7 +29,7 @@ const CONSUMERS_PER_CLIENT: u32 = 2;
 const NUM_MESSAGES: u64 = 100;
 const TERMINATION_GRACE: u64 = 1000; // in milliseconds
 
-type MessageStream = Box<dyn TryStream<Ok = Message, Error = Error> + Send + Unpin>;
+type MessageStream = Box<dyn Stream<Item = Result<Message, Error>> + Send + Unpin>;
 
 pub trait Factory {
     fn new_client<F>(&mut self, addr: SocketAddr, decorator: F) -> Client
@@ -56,7 +52,7 @@ where
 }
 
 pub struct Client {
-    inner: Box<dyn TryFuture<Ok = (), Error = Error> + Send + Unpin>,
+    inner: Box<dyn Future<Output = Result<(), Error>> + Send + Unpin>,
 }
 
 impl<F> Executor<F>
@@ -182,10 +178,10 @@ impl Client {
     ) -> Client
     where
         F: Fn(
-                Box<dyn TryStream<Ok = (Pattern, String), Error = Error> + Send + Unpin>,
+                Box<dyn Stream<Item = Result<(Pattern, String), Error>> + Send + Unpin>,
                 Pattern,
                 Arc<AtomicU64>,
-            ) -> Box<dyn TryFuture<Ok = (), Error = Error> + Send + Unpin>
+            ) -> Box<dyn Future<Output = Result<(), Error>> + Send + Unpin>
             + Send
             + 'static,
     {
@@ -220,7 +216,7 @@ impl Client {
             }
 
             tokio::spawn(
-                conn.forward(producer)
+                conn.forward(Compat::new(producer))
                     .compat()
                     .and_then(move |conn| {
                         debug!("Terminating consumers for {}", conn);
@@ -240,14 +236,10 @@ impl Client {
     }
 }
 
-impl TryFuture for Client {
-    type Ok = ();
-    type Error = Error;
+impl Future for Client {
+    type Output = Result<(), Error>;
 
-    fn try_poll(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<result::Result<Self::Ok, Self::Error>> {
-        unsafe { Pin::map_unchecked_mut(self.as_mut(), |x| &mut x.inner).try_poll(cx) }
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        unsafe { Pin::map_unchecked_mut(self.as_mut(), |x| &mut x.inner).poll(cx) }
     }
 }
