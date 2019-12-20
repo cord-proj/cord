@@ -39,6 +39,17 @@ pub trait Factory {
     fn set_consumers_per_client(&mut self, consumers_per_client: u32);
 }
 
+trait Accumulator {
+    fn accumulate<S>(
+        &mut self,
+        subscriber: S,
+        namespace: Pattern,
+        counter: Arc<AtomicU64>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>>
+    where
+        S: Stream<Item = Result<(Pattern, String), Error>> + Send + 'static;
+}
+
 pub struct Executor<F>
 where
     F: Factory + Send,
@@ -52,7 +63,7 @@ where
 }
 
 pub struct Client {
-    inner: Box<dyn Future<Output = Result<(), Error>> + Send + Unpin>,
+    inner: Box<dyn Future<Output = Result<(), Error>> + Unpin>,
 }
 
 impl<F> Executor<F>
@@ -169,21 +180,15 @@ where
 }
 
 impl Client {
-    fn new<F>(
+    fn new<A>(
         addr: SocketAddr,
         provider_namespace: Pattern,
         producer: MessageStream,
         subscribe_namespaces: Vec<(Pattern, Arc<AtomicU64>)>,
-        accumulator: F,
+        mut acc: A,
     ) -> Client
     where
-        F: Fn(
-                Box<dyn Stream<Item = Result<(Pattern, String), Error>> + Send + Unpin>,
-                Pattern,
-                Arc<AtomicU64>,
-            ) -> Box<dyn Future<Output = Result<(), Error>> + Send + Unpin>
-            + Send
-            + 'static,
+        A: Accumulator + 'static,
     {
         // Setup interrupt to terminate subscribers after producer is finished.
         let interrupt = Interrupt::new();
@@ -209,7 +214,7 @@ impl Client {
                 let interruptable = interrupt.attach(sub);
 
                 // Accumulate the stream to test results
-                let fut = accumulator(Box::new(interruptable), n, c);
+                let fut = acc.accumulate(interruptable, n, c);
 
                 // Push the accumulator future onto the heap
                 futs.push(fut);
@@ -239,7 +244,7 @@ impl Client {
 impl Future for Client {
     type Output = Result<(), Error>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         unsafe { Pin::map_unchecked_mut(self.as_mut(), |x| &mut x.inner).poll(cx) }
     }
 }

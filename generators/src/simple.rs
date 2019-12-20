@@ -1,8 +1,8 @@
-use super::{Client, Factory, MessageStream, CONSUMERS_PER_CLIENT};
+use super::{Accumulator, Client, Factory, MessageStream, CONSUMERS_PER_CLIENT};
 use client::errors::Error;
 use futures::{
     task::{Context, Poll},
-    Stream, TryFutureExt, TryStreamExt,
+    Future, FutureExt, Stream, TryFutureExt, TryStreamExt,
 };
 use log::{debug, error, info};
 use message::Message;
@@ -32,6 +32,8 @@ struct SimpleProducer {
     message: String,
     msg_count: Arc<AtomicU64>,
 }
+
+struct SimpleAccumulator;
 
 impl SimpleFactory {
     fn gen_namespace(&mut self) -> Pattern {
@@ -121,36 +123,7 @@ impl Factory for SimpleFactory {
                 counter.clone(),
             ))),
             subscriber_ns,
-            move |subscriber, namespace, counter| {
-                let namespace_c = namespace.clone();
-                Box::new(
-                    subscriber
-                        .try_fold(counter.load(Ordering::Relaxed), |acc, _| {
-                            async move {
-                                debug!("Subscriber {:?} received message {}", namespace_c, acc + 1);
-                                Ok(acc + 1)
-                            }
-                        })
-                        .and_then(|acc| {
-                            async move {
-                                let sent = counter.load(Ordering::Relaxed);
-                                if acc == sent {
-                                    info!(
-                                        "Subscriber {:?} received all {} messages",
-                                        namespace, acc
-                                    );
-                                } else {
-                                    error!(
-                                        "Subscriber {:?} only received {} of {} messages",
-                                        namespace, acc, sent
-                                    );
-                                }
-
-                                Ok(())
-                            }
-                        }),
-                )
-            },
+            SimpleAccumulator,
         )
     }
 
@@ -188,5 +161,40 @@ impl Stream for SimpleProducer {
             self.namespace.clone(),
             self.message.clone(),
         ))))
+    }
+}
+
+impl Accumulator for SimpleAccumulator {
+    fn accumulate<S>(
+        &mut self,
+        subscriber: S,
+        namespace: Pattern,
+        counter: Arc<AtomicU64>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>>
+    where
+        S: Stream<Item = Result<(Pattern, String), Error>> + Send + 'static,
+    {
+        let namespace_c = namespace.clone();
+        subscriber
+            .try_fold(counter.load(Ordering::Relaxed), move |acc, _| {
+                debug!("Subscriber {:?} received message {}", namespace_c, acc + 1);
+                async move { Ok(acc + 1) }
+            })
+            .and_then(|acc| {
+                async move {
+                    let sent = counter.load(Ordering::Relaxed);
+                    if acc == sent {
+                        info!("Subscriber {:?} received all {} messages", namespace, acc);
+                    } else {
+                        error!(
+                            "Subscriber {:?} only received {} of {} messages",
+                            namespace, acc, sent
+                        );
+                    }
+
+                    Ok(())
+                }
+            })
+            .boxed()
     }
 }
