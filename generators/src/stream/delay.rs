@@ -31,20 +31,20 @@ where
 {
     type Error = S::Error;
 
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.as_mut().stream().poll_ready(cx)
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.stream().poll_ready(cx)
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        self.as_mut().stream().start_send(item)
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
+        self.stream().start_send(item)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.as_mut().stream().poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.stream().poll_flush(cx)
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.as_mut().stream().poll_close(cx)
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.stream().poll_close(cx)
     }
 }
 
@@ -61,7 +61,7 @@ where
         match delay.poll_unpin(cx) {
             Poll::Ready(_) => {
                 self.delay = None;
-                self.as_mut().stream().poll_next(cx)
+                self.stream().poll_next(cx)
             }
             Poll::Pending => Poll::Pending,
         }

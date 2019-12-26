@@ -227,7 +227,7 @@ impl Client {
                         debug!("Terminating consumers for {}", conn);
                         interrupt
                             .after(Duration::from_millis(TERMINATION_GRACE))
-                            .map(|x| Ok(x))
+                            .map(Ok)
                     })
                     .map_err(|e| error!("{}", e)),
             );
@@ -244,7 +244,7 @@ impl Client {
 impl Future for Client {
     type Output = Result<(), Error>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        unsafe { Pin::map_unchecked_mut(self.as_mut(), |x| &mut x.inner).poll(cx) }
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        unsafe { Pin::map_unchecked_mut(self, |x| &mut x.inner).poll(cx) }
     }
 }

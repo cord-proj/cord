@@ -117,11 +117,7 @@ impl Factory for SimpleFactory {
         Client::new(
             addr,
             provider_ns.clone(),
-            decorator(Box::new(SimpleProducer::new(
-                provider_ns,
-                MESSAGE,
-                counter.clone(),
-            ))),
+            decorator(Box::new(SimpleProducer::new(provider_ns, MESSAGE, counter))),
             subscriber_ns,
             SimpleAccumulator,
         )

@@ -3,7 +3,7 @@ pub mod errors;
 use errors::{Error, ErrorKind, Result};
 use futures::{Future, Stream};
 use futures_locks::Mutex;
-use log::{debug, error};
+use log::error;
 use message::{Codec, Message};
 use pattern_matcher::Pattern;
 use retain_mut::RetainMut;
