@@ -50,7 +50,7 @@ where
 
 impl<S> Stream for Delay<S>
 where
-    S: Stream,
+    S: Stream + Unpin,
 {
     type Item = S::Item;
 
