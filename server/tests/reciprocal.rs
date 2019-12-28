@@ -1,81 +1,94 @@
 use client::{Conn, Subscriber};
-use futures::{Future, Stream};
-use pattern_matcher::Pattern;
-use std::{
-    panic,
-    time::{Duration, Instant},
+use futures::{
+    compat::Future01CompatExt, compat::Stream01CompatExt, join, Future, FutureExt, StreamExt,
+    TryFutureExt, TryStreamExt,
 };
-use tokio::{sync::oneshot, timer::Delay};
+use pattern_matcher::Pattern;
+use std::{panic, time::Duration};
+use tokio::{sync::oneshot, time};
 
 mod utils;
 
-#[test]
-fn test_reciprocal() {
-    let f = |socket_addr| {
-        let (tx, mut rx1) = oneshot::channel();
-        let client1 = Conn::new(socket_addr)
-            .map_err(|e| panic!("{}", e))
-            .and_then(|mut conn| {
-                conn.provide("/users".into()).unwrap();
+#[tokio::test]
+async fn test_reciprocal() {
+    // Start logger
+    utils::init_log();
 
-                Delay::new(Instant::now() + Duration::from_millis(100))
-                    .map_err(|e| panic!(e))
-                    .and_then(|_| {
+    // Start a new server process
+    let (mut server, socket_addr) = utils::start_server();
+
+    let result = panic::catch_unwind(|| {
+        async {
+            let (tx, mut rx1) = oneshot::channel();
+            let client1 = Conn::new(socket_addr)
+                .compat()
+                .map_err(|e| panic!("{}", e))
+                .and_then(|mut conn| {
+                    conn.provide("/users".into()).unwrap();
+
+                    time::delay_for(Duration::from_millis(100)).then(|_| {
                         let group_rx = conn.subscribe("/groups".into()).unwrap();
 
-                        Delay::new(Instant::now() + Duration::from_millis(100))
-                            .map_err(|e| panic!(e))
-                            .and_then(move |_| {
-                                conn.event("/users/add".into(), "Mark has joined").unwrap();
+                        time::delay_for(Duration::from_millis(100))
+                            .then(move |_| {
+                                async {
+                                    conn.event("/users/add".into(), "Mark has joined").unwrap();
+                                }
+                            })
+                            .then(|_| {
+                                send_event(group_rx, tx);
                                 Ok(())
                             })
-                            .and_then(|_| send_event(group_rx, tx))
                     })
-            });
+                });
 
-        let (tx, mut rx2) = oneshot::channel();
-        let client2 = Conn::new(socket_addr)
-            .map_err(|e| panic!("{}", e))
-            .and_then(|mut conn| {
-                conn.provide("/groups".into()).unwrap();
+            let (tx, mut rx2) = oneshot::channel();
+            let client2 = Conn::new(socket_addr)
+                .compat()
+                .map_err(|e| panic!("{}", e))
+                .and_then(|mut conn| {
+                    conn.provide("/groups".into()).unwrap();
 
-                Delay::new(Instant::now() + Duration::from_millis(100))
-                    .map_err(|e| panic!(e))
-                    .and_then(|_| {
+                    time::delay_for(Duration::from_millis(100)).then(|_| {
                         let user_rx = conn.subscribe("/users".into()).unwrap();
 
-                        Delay::new(Instant::now() + Duration::from_millis(100))
-                            .map_err(|e| panic!(e))
-                            .and_then(move |_| {
-                                conn.event("/groups/add".into(), "Admin group created")
-                                    .unwrap();
-                                Ok(())
+                        time::delay_for(Duration::from_millis(100))
+                            .then(move |_| {
+                                async {
+                                    conn.event("/groups/add".into(), "Admin group created")
+                                        .unwrap();
+                                }
                             })
-                            .and_then(|_| send_event(user_rx, tx))
+                            .then(|_| send_event(user_rx, tx))
                     })
-            });
+                });
 
-        tokio::run(client1.join(client2).map(|_| ()));
+            join!(client1, client2);
 
-        assert_eq!(
-            rx1.try_recv().unwrap(),
-            ("/groups/add".into(), "Admin group created".into())
-        );
+            assert_eq!(
+                rx1.try_recv().unwrap(),
+                ("/groups/add".into(), "Admin group created".into())
+            );
 
-        assert_eq!(
-            rx2.try_recv().unwrap(),
-            ("/users/add".into(), "Mark has joined".into())
-        );
-    };
+            assert_eq!(
+                rx2.try_recv().unwrap(),
+                ("/users/add".into(), "Mark has joined".into())
+            );
+        }
+    });
 
-    utils::run_client(f);
+    // Terminate the server
+    server.kill().expect("Server was not running");
+
+    // Now we can resume panicking if needed
+    if let Err(e) = result {
+        panic::resume_unwind(e);
+    }
 }
 
-fn send_event(
-    rx: Subscriber,
-    tx: oneshot::Sender<(Pattern, String)>,
-) -> impl Future<Item = (), Error = ()> {
-    rx.into_future()
+fn send_event(rx: Subscriber, tx: oneshot::Sender<(Pattern, String)>) -> impl Future<Output = ()> {
+    rx.compat()
+        .into_future()
         .and_then(move |(opt, _)| {
             tx.send(opt.unwrap()).unwrap();
             Ok(())

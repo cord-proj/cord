@@ -3,7 +3,6 @@ use std::{
     env,
     io::Read,
     net::SocketAddr,
-    panic,
     path::PathBuf,
     process::{Child, Command, Stdio},
     str,
@@ -15,26 +14,7 @@ pub fn init_log() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-pub fn run_client<F: FnOnce(SocketAddr) + panic::UnwindSafe>(f: F) {
-    // Start a new server process
-    let (mut server, port) = start_server();
-
-    // Convert the port into a SocketAddr to be friendly to the caller
-    let socket_addr = format!("127.0.0.1:{}", port).parse().unwrap();
-
-    // Catch panics to ensure that we have the opportunity to terminate the server
-    let result = panic::catch_unwind(|| f(socket_addr));
-
-    // Terminate the server
-    server.kill().expect("Server was not running");
-
-    // Now we can resume panicking if needed
-    if let Err(e) = result {
-        panic::resume_unwind(e);
-    }
-}
-
-fn start_server() -> (Child, u16) {
+pub fn start_server() -> (Child, SocketAddr) {
     let mut child = command().spawn().unwrap();
 
     // Get port number
@@ -45,7 +25,9 @@ fn start_server() -> (Child, u16) {
         .unwrap()
         .read_exact(&mut bytes)
         .unwrap();
-    (child, str::from_utf8(&bytes).unwrap().parse().unwrap())
+    let port: u16 = str::from_utf8(&bytes).unwrap().parse().unwrap();
+
+    (child, format!("127.0.0.1:{}", port).parse().unwrap())
 }
 
 fn command() -> Command {

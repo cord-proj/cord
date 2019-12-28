@@ -51,8 +51,9 @@ impl Interrupt {
     pub fn after(self, duration: Duration) -> impl Future<Output = ()> {
         debug!("Terminating attached streams in {:?}", duration);
         time::delay_for(duration).then(|_| {
-            self.now();
-            async {}
+            async {
+                self.now();
+            }
         })
     }
 }
