@@ -17,64 +17,58 @@ async fn test_reciprocal() {
     // Start a new server process
     let (mut server, socket_addr) = utils::start_server();
 
-    let result = panic::catch_unwind(|| {
-        async {
-            let (tx, mut rx1) = oneshot::channel();
-            let client1 = Conn::new(socket_addr)
-                .compat()
-                .map_err(|e| panic!("{}", e))
-                .and_then(|mut conn| {
-                    conn.provide("/users".into()).unwrap();
+    let result = panic::catch_unwind(|| async {
+        let (tx, mut rx1) = oneshot::channel();
+        let client1 = Conn::new(socket_addr)
+            .compat()
+            .map_err(|e| panic!("{}", e))
+            .and_then(|mut conn| {
+                conn.provide("/users".into()).unwrap();
 
-                    time::delay_for(Duration::from_millis(100)).then(|_| {
-                        let group_rx = conn.subscribe("/groups".into()).unwrap();
+                time::delay_for(Duration::from_millis(100)).then(|_| {
+                    let group_rx = conn.subscribe("/groups".into()).unwrap();
 
-                        time::delay_for(Duration::from_millis(100))
-                            .then(move |_| {
-                                async {
-                                    conn.event("/users/add".into(), "Mark has joined").unwrap();
-                                }
-                            })
-                            .then(|_| {
-                                send_event(group_rx, tx);
-                                Ok(())
-                            })
-                    })
-                });
+                    time::delay_for(Duration::from_millis(100))
+                        .then(move |_| async {
+                            conn.event("/users/add".into(), "Mark has joined").unwrap();
+                        })
+                        .then(|_| {
+                            send_event(group_rx, tx);
+                            Ok(())
+                        })
+                })
+            });
 
-            let (tx, mut rx2) = oneshot::channel();
-            let client2 = Conn::new(socket_addr)
-                .compat()
-                .map_err(|e| panic!("{}", e))
-                .and_then(|mut conn| {
-                    conn.provide("/groups".into()).unwrap();
+        let (tx, mut rx2) = oneshot::channel();
+        let client2 = Conn::new(socket_addr)
+            .compat()
+            .map_err(|e| panic!("{}", e))
+            .and_then(|mut conn| {
+                conn.provide("/groups".into()).unwrap();
 
-                    time::delay_for(Duration::from_millis(100)).then(|_| {
-                        let user_rx = conn.subscribe("/users".into()).unwrap();
+                time::delay_for(Duration::from_millis(100)).then(|_| {
+                    let user_rx = conn.subscribe("/users".into()).unwrap();
 
-                        time::delay_for(Duration::from_millis(100))
-                            .then(move |_| {
-                                async {
-                                    conn.event("/groups/add".into(), "Admin group created")
-                                        .unwrap();
-                                }
-                            })
-                            .then(|_| send_event(user_rx, tx))
-                    })
-                });
+                    time::delay_for(Duration::from_millis(100))
+                        .then(move |_| async {
+                            conn.event("/groups/add".into(), "Admin group created")
+                                .unwrap();
+                        })
+                        .then(|_| send_event(user_rx, tx))
+                })
+            });
 
-            join!(client1, client2);
+        join!(client1, client2);
 
-            assert_eq!(
-                rx1.try_recv().unwrap(),
-                ("/groups/add".into(), "Admin group created".into())
-            );
+        assert_eq!(
+            rx1.try_recv().unwrap(),
+            ("/groups/add".into(), "Admin group created".into())
+        );
 
-            assert_eq!(
-                rx2.try_recv().unwrap(),
-                ("/users/add".into(), "Mark has joined".into())
-            );
-        }
+        assert_eq!(
+            rx2.try_recv().unwrap(),
+            ("/users/add".into(), "Mark has joined".into())
+        );
     });
 
     // Terminate the server

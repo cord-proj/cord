@@ -16,13 +16,11 @@ async fn test_load() {
     let (mut server, socket_addr) = utils::start_server();
 
     // Catch panics to ensure that we have the opportunity to terminate the server
-    let result = panic::catch_unwind(|| {
-        async {
-            let mut executor = Executor::new(SimpleFactory::default(), socket_addr);
-            executor.set_frequency(None);
-            info!("{}", executor);
-            executor.exec().map_err(|e| error!("{}", e)).await
-        }
+    let result = panic::catch_unwind(|| async {
+        let mut executor = Executor::new(SimpleFactory::default(), socket_addr);
+        executor.set_frequency(None);
+        info!("{}", executor);
+        executor.exec().map_err(|e| error!("{}", e)).await
     });
 
     // Terminate the server

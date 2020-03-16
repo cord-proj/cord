@@ -176,20 +176,18 @@ impl Accumulator for SimpleAccumulator {
                 debug!("Subscriber {:?} received message {}", namespace_c, acc + 1);
                 async move { Ok(acc + 1) }
             })
-            .and_then(|acc| {
-                async move {
-                    let sent = counter.load(Ordering::Relaxed);
-                    if acc == sent {
-                        info!("Subscriber {:?} received all {} messages", namespace, acc);
-                    } else {
-                        error!(
-                            "Subscriber {:?} only received {} of {} messages",
-                            namespace, acc, sent
-                        );
-                    }
-
-                    Ok(())
+            .and_then(|acc| async move {
+                let sent = counter.load(Ordering::Relaxed);
+                if acc == sent {
+                    info!("Subscriber {:?} received all {} messages", namespace, acc);
+                } else {
+                    error!(
+                        "Subscriber {:?} only received {} of {} messages",
+                        namespace, acc, sent
+                    );
                 }
+
+                Ok(())
             })
             .boxed()
     }
