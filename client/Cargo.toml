@@ -5,9 +5,12 @@ authors = ["Pete Hayes <pete@hayes.id.au>"]
 edition = "2018"
 
 [dependencies]
+clap = "2.33"
+env_logger = "0.6"
 error-chain = "0.12"
 futures = "0.1"
 futures-locks = "0.3"
+log = "0.4"
 message = { version = "0.1", path = "../message" }
 pattern-matcher = { version = "0.1", path = "../pattern-matcher" }
 retain_mut = "0.1"
