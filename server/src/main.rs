@@ -80,7 +80,7 @@ fn main() -> Result<()> {
                         let subscriber = sink_to_channel(sink);
 
                         // Create a clonable publisher handle so we can control the publisher from afar
-                        let handle = Publisher::new(name, subscriber);
+                        let mut handle = Publisher::new(name, subscriber);
                         let newbie = handle.clone();
 
                         // Introduce the newbie to all the other publishers. This allows each

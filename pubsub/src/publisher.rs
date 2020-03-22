@@ -1,4 +1,4 @@
-use crate::{errors::Error, subscriber::Subscriber};
+use crate::{errors::*, subscriber::Subscriber};
 use futures::{self, future, Future};
 use futures_locks::Mutex;
 use log::debug;
@@ -18,7 +18,13 @@ pub struct Publisher {
     name: SocketAddr,
     // This is a channel to the write half of our TcpStream
     consumer: UnboundedSender<Message>,
-    subscribers: Mutex<HashMap<Message, HashMap<Uuid, Subscriber>>>,
+    inner: Mutex<PublishInner>,
+}
+
+pub struct PublishInner {
+    provides: Vec<Pattern>,
+    subscribes: Vec<Pattern>,
+    subscribers: HashMap<Message, HashMap<Uuid, Subscriber>>,
 }
 
 impl fmt::Display for Publisher {
@@ -32,7 +38,11 @@ impl Publisher {
         Publisher {
             name,
             consumer,
-            subscribers: Mutex::new(HashMap::new()),
+            inner: Mutex::new(PublishInner {
+                provides: Vec::new(),
+                subscribes: Vec::new(),
+                subscribers: HashMap::new(),
+            }),
         }
     }
 
@@ -41,9 +51,31 @@ impl Publisher {
         debug!(target: "publisher", "Link {} with {}", self, other);
 
         let me = self.clone();
+        let me_two = self.clone();
         let you = other.clone();
+        let you_two = other.clone();
 
-        self.on_link(you).join(other.on_link(me)).map(|_| ())
+        // Link publishers
+        let join = self.on_link(you).join(other.on_link(me)).map(|_| ());
+
+        // Replay provide messages for new joiner
+        join.and_then(move |_| {
+            let me_three = me_two.clone();
+
+            me_two
+                .inner
+                .with(move |guard| {
+                    let mut futs = Vec::new();
+
+                    (*guard).provides.iter().for_each(|p| {
+                        debug!(target: "publisher", "Replay {:?} for new joiner", p);
+                        futs.push(you_two.on_provide(p.clone(), me_three.clone()))
+                    });
+
+                    future::join_all(futs).map(|_| ())
+                })
+                .expect("The default executor has shut down")
+        })
     }
 
     // Helper function for subscribing another publisher to our PROVIDE and REVOKE
@@ -157,9 +189,10 @@ impl Publisher {
 
         (
             uuid,
-            self.subscribers
+            self.inner
                 .with(move |mut guard| {
                     (*guard)
+                        .subscribers
                         .entry(message)
                         .or_insert_with(HashMap::new)
                         .insert(uuid, subscriber);
@@ -173,9 +206,9 @@ impl Publisher {
     fn unsubscribe(&self, message: Message, sub_id: Uuid) -> impl Future<Item = (), Error = Error> {
         debug!(target: "publisher", "Unsubscribe {} from {:?} for {}", sub_id, message, self);
 
-        self.subscribers
+        self.inner
             .with(move |mut guard| {
-                if let Entry::Occupied(mut o) = (*guard).entry(message) {
+                if let Entry::Occupied(mut o) = (*guard).subscribers.entry(message) {
                     let e = o.get_mut();
                     e.remove(&sub_id);
 
@@ -197,9 +230,9 @@ impl Publisher {
     fn unsubscribe_children(&self, message: Message) -> impl Future<Item = (), Error = Error> {
         debug!(target: "publisher", "Unsubscribe everyone from {:?} for {}", message, self);
 
-        self.subscribers
+        self.inner
             .with(move |mut guard| {
-                (*guard).retain(|k, _| !message.contains(&k));
+                (*guard).subscribers.retain(|k, _| !message.contains(&k));
                 future::ok(())
             })
             .expect("The default executor has shut down")
@@ -207,11 +240,24 @@ impl Publisher {
 
     // Route a message to all interested subscribers, making sure we clean up any
     // subscribers that are only executed once (i.e. OnetimeTask).
-    pub fn route(&self, message: Message) -> impl Future<Item = (), Error = Error> {
+    pub fn route(&mut self, message: Message) -> impl Future<Item = (), Error = Error> {
         let name = self.name;
 
-        self.subscribers
+        self.inner
             .with(move |mut guard| {
+                // Cache important messages so we can replay them to new joiners
+                match message {
+                    Message::Provide(ref pattern) => (*guard).provides.push(pattern.clone()),
+                    Message::Revoke(ref pattern) => {
+                        (*guard).provides.retain(|provide| provide != pattern)
+                    }
+                    Message::Subscribe(ref pattern) => (*guard).subscribes.push(pattern.clone()),
+                    Message::Unsubscribe(ref pattern) => {
+                        (*guard).subscribes.retain(|subscribe| subscribe != pattern)
+                    }
+                    _ => (),
+                }
+
                 debug!("Received message {:?} from {}", message, name);
 
                 let mut futs = vec![];
@@ -219,7 +265,7 @@ impl Publisher {
                 // In the inner loop we may cleanup all of the subscribers in the
                 // `subs` map. This leaves us with an empty map that should also
                 // be tidied up, hence the use of retain() here.
-                (*guard).retain(|sub_msg, subs| {
+                (*guard).subscribers.retain(|sub_msg, subs| {
                     if sub_msg.contains(&message) {
                         debug!("Subscriber {:?} matches {:?}", sub_msg, message);
                         // We use retain() here, which allows us to cleanup any
@@ -311,10 +357,10 @@ mod tests {
     fn add_message(
         message: Message,
         message_subs: HashMap<Uuid, Subscriber>,
-        subs: &mut HashMap<Message, HashMap<Uuid, Subscriber>>,
+        subs: &mut PublishInner,
     ) -> Message {
         let message_c = message.clone();
-        subs.insert(message, message_subs);
+        subs.subscribers.insert(message, message_subs);
         message_c
     }
 
@@ -377,19 +423,28 @@ mod tests {
     fn test_on_link() {
         RUNTIME.lock().unwrap().start();
 
-        let s1 = Mutex::new(HashMap::new());
+        let s1 = Mutex::new(PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        });
         let (tx, _) = mpsc::unbounded_channel();
         let h1 = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: s1.clone(),
+            inner: s1.clone(),
         };
 
         let (tx, _) = mpsc::unbounded_channel();
         let h2 = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+
             consumer: tx,
-            subscribers: Mutex::new(HashMap::new()),
+            inner: Mutex::new(PublishInner {
+                provides: Vec::new(),
+                subscribes: Vec::new(),
+                subscribers: HashMap::new(),
+            }),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -403,10 +458,10 @@ mod tests {
         let subs = s1.try_lock().ok().unwrap();
 
         let m1 = Message::Provide("/".into());
-        assert_eq!(subs[&m1].len(), 1);
+        assert_eq!(subs.subscribers[&m1].len(), 1);
 
         let m2 = Message::Revoke("/".into());
-        assert_eq!(subs[&m2].len(), 1);
+        assert_eq!(subs.subscribers[&m2].len(), 1);
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -419,20 +474,28 @@ mod tests {
     fn test_on_provide() {
         RUNTIME.lock().unwrap().start();
 
-        let s1 = Mutex::new(HashMap::new());
+        let s1 = Mutex::new(PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        });
         let (tx, _) = mpsc::unbounded_channel();
         let h1 = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: s1.clone(),
+            inner: s1.clone(),
         };
 
-        let s2 = Mutex::new(HashMap::new());
+        let s2 = Mutex::new(PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        });
         let (tx, _) = mpsc::unbounded_channel();
         let h2 = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: s2.clone(),
+            inner: s2.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -445,11 +508,11 @@ mod tests {
 
         let m1 = Message::Subscribe("/a".into());
         let subs = s1.try_lock().ok().unwrap();
-        assert_eq!(subs[&m1].len(), 1);
+        assert_eq!(subs.subscribers[&m1].len(), 1);
 
         let m2 = Message::Revoke("/a".into());
         let subs = s2.try_lock().ok().unwrap();
-        assert_eq!(subs[&m2].len(), 1);
+        assert_eq!(subs.subscribers[&m2].len(), 1);
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -462,20 +525,28 @@ mod tests {
     fn test_on_subscribe() {
         RUNTIME.lock().unwrap().start();
 
-        let s1 = Mutex::new(HashMap::new());
+        let s1 = Mutex::new(PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        });
         let (tx, _) = mpsc::unbounded_channel();
         let h1 = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: s1.clone(),
+            inner: s1.clone(),
         };
 
-        let s2 = Mutex::new(HashMap::new());
+        let s2 = Mutex::new(PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        });
         let (tx, _) = mpsc::unbounded_channel();
         let h2 = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: s2.clone(),
+            inner: s2.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -488,11 +559,11 @@ mod tests {
 
         let m2 = Message::Unsubscribe("/a".into());
         let subs = s2.try_lock().ok().unwrap();
-        assert_eq!(subs[&m2].len(), 1);
+        assert_eq!(subs.subscribers[&m2].len(), 1);
 
         let m1 = Message::Event("/a".into(), String::new());
         let subs = s1.try_lock().ok().unwrap();
-        assert_eq!(subs[&m1].len(), 1);
+        assert_eq!(subs.subscribers[&m1].len(), 1);
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -502,13 +573,17 @@ mod tests {
         RUNTIME.lock().unwrap().start();
 
         let (tx, _) = mpsc::unbounded_channel();
-        let subscribers = Mutex::new(HashMap::new());
+        let inner = Mutex::new(PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        });
         let message = Message::Provide("/a".into());
         let message_c = message.clone();
         let handle = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: subscribers.clone(),
+            inner: inner.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -525,8 +600,8 @@ mod tests {
             })
         }));
 
-        let subs = subscribers.try_unwrap().ok().unwrap();
-        assert!(subs[&message].contains_key(&rx.try_recv().unwrap()));
+        let inn = inner.try_unwrap().ok().unwrap();
+        assert!(inn.subscribers[&message].contains_key(&rx.try_recv().unwrap()));
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -537,19 +612,23 @@ mod tests {
 
         let (tx, _) = mpsc::unbounded_channel();
 
-        let mut subs = HashMap::new();
+        let mut pi = PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        };
 
         let mut message_subs = HashMap::new();
         let uuid = add_message_sub(&mut message_subs);
-        let message = add_message(Message::Provide("/a".into()), message_subs, &mut subs);
+        let message = add_message(Message::Provide("/a".into()), message_subs, &mut pi);
         let message_c = message.clone();
 
-        let subscribers = Mutex::new(subs);
+        let inner = Mutex::new(pi);
 
         let handle = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: subscribers.clone(),
+            inner: inner.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -560,8 +639,8 @@ mod tests {
             })
         }));
 
-        let subs = subscribers.try_unwrap().ok().unwrap();
-        assert!(!subs.contains_key(&message_c));
+        let inn = inner.try_unwrap().ok().unwrap();
+        assert!(!inn.subscribers.contains_key(&message_c));
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -572,20 +651,24 @@ mod tests {
 
         let (tx, _) = mpsc::unbounded_channel();
 
-        let mut subs = HashMap::new();
+        let mut pi = PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        };
 
         let mut message_subs = HashMap::new();
         let uuid1 = add_message_sub(&mut message_subs);
         let uuid2 = add_message_sub(&mut message_subs);
-        let message = add_message(Message::Provide("/a".into()), message_subs, &mut subs);
+        let message = add_message(Message::Provide("/a".into()), message_subs, &mut pi);
         let message_c = message.clone();
 
-        let subscribers = Mutex::new(subs);
+        let inner = Mutex::new(pi);
 
         let handle = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: subscribers.clone(),
+            inner: inner.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -596,10 +679,10 @@ mod tests {
             })
         }));
 
-        let subs = subscribers.try_unwrap().ok().unwrap();
-        assert!(subs.contains_key(&message_c));
-        assert!(!subs[&message_c].contains_key(&uuid1));
-        assert!(subs[&message_c].contains_key(&uuid2));
+        let inn = inner.try_unwrap().ok().unwrap();
+        assert!(inn.subscribers.contains_key(&message_c));
+        assert!(!inn.subscribers[&message_c].contains_key(&uuid1));
+        assert!(inn.subscribers[&message_c].contains_key(&uuid2));
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -610,30 +693,34 @@ mod tests {
 
         let (tx, _) = mpsc::unbounded_channel();
 
-        let mut subs = HashMap::new();
+        let mut pi = PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        };
 
         let mut message_subs = HashMap::new();
         add_message_sub(&mut message_subs);
-        let provide_a = add_message(Message::Provide("/a".into()), message_subs, &mut subs);
+        let provide_a = add_message(Message::Provide("/a".into()), message_subs, &mut pi);
 
         let mut message_subs = HashMap::new();
         add_message_sub(&mut message_subs);
-        let provide_ab = add_message(Message::Provide("/a/b".into()), message_subs, &mut subs);
+        let provide_ab = add_message(Message::Provide("/a/b".into()), message_subs, &mut pi);
 
         let mut message_subs = HashMap::new();
         add_message_sub(&mut message_subs);
-        let provide_c = add_message(Message::Provide("/c".into()), message_subs, &mut subs);
+        let provide_c = add_message(Message::Provide("/c".into()), message_subs, &mut pi);
 
         let mut message_subs = HashMap::new();
         add_message_sub(&mut message_subs);
-        let revoke_a = add_message(Message::Revoke("/a".into()), message_subs, &mut subs);
+        let revoke_a = add_message(Message::Revoke("/a".into()), message_subs, &mut pi);
 
-        let subscribers = Mutex::new(subs);
+        let inner = Mutex::new(pi);
 
         let handle = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: subscribers.clone(),
+            inner: inner.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -646,11 +733,11 @@ mod tests {
                 })
         }));
 
-        let subs = subscribers.try_unwrap().ok().unwrap();
-        assert!(!subs.contains_key(&provide_a));
-        assert!(!subs.contains_key(&provide_ab));
-        assert!(subs.contains_key(&provide_c));
-        assert!(subs.contains_key(&revoke_a));
+        let inn = inner.try_unwrap().ok().unwrap();
+        assert!(!inn.subscribers.contains_key(&provide_a));
+        assert!(!inn.subscribers.contains_key(&provide_ab));
+        assert!(inn.subscribers.contains_key(&provide_c));
+        assert!(inn.subscribers.contains_key(&revoke_a));
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -661,18 +748,22 @@ mod tests {
 
         let (tx, _) = mpsc::unbounded_channel();
 
-        let mut subs = HashMap::new();
+        let mut pi = PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        };
 
         let mut retain_subs = HashMap::new();
         let (uuid, trigger) = add_message_sub_once_checked(&mut retain_subs);
-        let message = add_message(Message::Subscribe("/a".into()), retain_subs, &mut subs);
+        let message = add_message(Message::Subscribe("/a".into()), retain_subs, &mut pi);
 
-        let subscribers = Mutex::new(subs);
+        let inner = Mutex::new(pi);
 
-        let handle = Publisher {
+        let mut handle = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: subscribers.clone(),
+            inner: inner.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -685,9 +776,9 @@ mod tests {
         assert!(!*trigger.try_lock().ok().unwrap());
 
         // Check that subscribers contains the message we expect to have retained
-        let subs = subscribers.try_lock().ok().unwrap();
-        assert_eq!(subs[&message].len(), 1);
-        assert!(subs[&message].contains_key(&uuid));
+        let inn = inner.try_lock().ok().unwrap();
+        assert_eq!(inn.subscribers[&message].len(), 1);
+        assert!(inn.subscribers[&message].contains_key(&uuid));
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -698,7 +789,11 @@ mod tests {
 
         let (tx, _) = mpsc::unbounded_channel();
 
-        let mut subs = HashMap::new();
+        let mut pi = PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        };
 
         // Susbcription to test retention for non-empty maps
         let mut retain_subs = HashMap::new();
@@ -706,15 +801,15 @@ mod tests {
         let (uuid_a, trigger_a) = add_message_sub_checked(&mut retain_subs);
         // This message should be deleted during `route()`
         let (_, trigger_b) = add_message_sub_once_checked(&mut retain_subs);
-        let message = add_message(Message::Subscribe("/a".into()), retain_subs, &mut subs);
+        let message = add_message(Message::Subscribe("/a".into()), retain_subs, &mut pi);
         let message_c = message.clone();
 
-        let subscribers = Mutex::new(subs);
+        let inner = Mutex::new(pi);
 
-        let handle = Publisher {
+        let mut handle = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: subscribers.clone(),
+            inner: inner.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -729,9 +824,9 @@ mod tests {
         assert!(*trigger_b.try_lock().ok().unwrap());
 
         // Check that subscribers contains the one message we expect to have retained
-        let subs = subscribers.try_lock().ok().unwrap();
-        assert_eq!(subs[&message_c].len(), 1);
-        assert!(subs[&message_c].contains_key(&uuid_a));
+        let inn = inner.try_lock().ok().unwrap();
+        assert_eq!(inn.subscribers[&message_c].len(), 1);
+        assert!(inn.subscribers[&message_c].contains_key(&uuid_a));
 
         RUNTIME.lock().unwrap().stop();
     }
@@ -742,19 +837,23 @@ mod tests {
 
         let (tx, _) = mpsc::unbounded_channel();
 
-        let mut subs = HashMap::new();
+        let mut pi = PublishInner {
+            provides: Vec::new(),
+            subscribes: Vec::new(),
+            subscribers: HashMap::new(),
+        };
 
         // Subscription to test deletion of empty maps
         let mut delete_subs = HashMap::new();
         let (_, trigger) = add_message_sub_once_checked(&mut delete_subs);
-        let message = add_message(Message::Unsubscribe("/b".into()), delete_subs, &mut subs);
+        let message = add_message(Message::Unsubscribe("/b".into()), delete_subs, &mut pi);
 
-        let subscribers = Mutex::new(subs);
+        let inner = Mutex::new(pi);
 
-        let handle = Publisher {
+        let mut handle = Publisher {
             name: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             consumer: tx,
-            subscribers: subscribers.clone(),
+            inner: inner.clone(),
         };
 
         // All this extra fluff around future::lazy() is necessary to ensure that there
@@ -768,7 +867,7 @@ mod tests {
         assert!(*trigger.try_lock().ok().unwrap());
 
         // Check that subscribers is empty
-        assert!(subscribers.try_lock().ok().unwrap().is_empty());
+        assert!(inner.try_lock().ok().unwrap().subscribers.is_empty());
 
         RUNTIME.lock().unwrap().stop();
     }
