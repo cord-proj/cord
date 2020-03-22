@@ -1,0 +1,27 @@
+@startuml
+actor "Publisher 1" as pub
+actor "Publisher 2" as new
+
+== Provide ==
+pub -> pub : <b>on_link()</b>\nSubscribe to ""PROVIDE[/]""
+pub --> new : ""PROVIDE[<namespace>]""
+
+new -> new : <b>on_provide()</b>\nSubscribe to ""SUBSCRIBE[<namespace>]""
+new --> pub : ""SUBSCRIBE[<namespace>]""
+
+pub -> pub : <b>on_subscribe()</b>\nSubscribe to ""EVENT[<namespace>]""
+pub --> new : ""EVENT[<namespace]""
+
+== Revoke ==
+pub -> pub : <b>on_link()</b>\nSubscribe to ""REVOKE[/]""
+pub --> pub : ""REVOKE[<namespace>]""
+pub -> pub : Unsubscribe all ""EVENT[<namespace>]""
+
+pub -> pub : <b>on_provide()</b>\nSubscribe to ""REVOKE[<namespace>]""
+pub --> new : ""REVOKE[<namespace>]""
+new -> new : Unsubscribe from ""SUBSCRIBE[<namespace>]""
+
+new -> new : <b>on_subscribe()</b>\nSubscribe to ""UNSUBSCRIBE[<namespace>]""
+pub --> new : ""UNSUBSCRIBE[<namespace>]""
+pub -> pub : Unsubscribe from ""EVENT[<namespace>]""
+@enduml
