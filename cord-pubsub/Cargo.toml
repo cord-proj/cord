@@ -2,6 +2,11 @@
 name = "cord-pubsub"
 version = "0.1.0"
 authors = ["Pete Hayes <pete@hayes.id.au>"]
+license = "MPL-2.0"
+description = "provides a Publisher and Subscriber to represent the stream and sink components of a client connection within a broker"
+repository = "https://github.com/cord-proj/cord"
+keywords = ["cord", "stream", "streaming"]
+categories = ["network-programming", "data-structures"]
 edition = "2018"
 
 [dependencies]

@@ -2,4 +2,9 @@
 name = "cord-pattern"
 version = "0.1.0"
 authors = ["Pete Hayes <pete@hayes.id.au>"]
+license = "MPL-2.0"
+description = "Provides the algorithm for comparing namespace patterns"
+repository = "https://github.com/cord-proj/cord"
+keywords = ["cord", "stream", "streaming"]
+categories = ["network-programming", "data-structures"]
 edition = "2018"
