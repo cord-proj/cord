@@ -58,7 +58,7 @@ impl Publisher {
         // Link publishers
         let join = self.on_link(you).join(other.on_link(me)).map(|_| ());
 
-        // Replay provide messages for new joiner
+        // Replay PROVIDE messages for new joiner
         join.and_then(move |_| {
             let me_three = me_two.clone();
 
@@ -66,12 +66,10 @@ impl Publisher {
                 .inner
                 .with(move |guard| {
                     let mut futs = Vec::new();
-
                     (*guard).provides.iter().for_each(|p| {
                         debug!(target: "publisher", "Replay {:?} for new joiner", p);
-                        futs.push(you_two.on_provide(p.clone(), me_three.clone()))
+                        futs.push(you_two.on_provide(p.clone(), me_three.clone()));
                     });
-
                     future::join_all(futs).map(|_| ())
                 })
                 .expect("The default executor has shut down")
@@ -117,8 +115,11 @@ impl Publisher {
     ) -> impl Future<Item = (), Error = Error> {
         let me = self.clone();
         let me_two = self.clone();
-        let other_clone = other.clone();
-        let namespace_clone = namespace.clone();
+        let me_three = self.clone();
+        let you_two = other.clone();
+        let you_three = other.clone();
+        let namespace_two = namespace.clone();
+        let namespace_three = namespace.clone();
 
         // Add a subscription for any SUBSCRIBE messages from our client that match the
         // other publisher's namespace. I.e. if our client wants to subscribe to /a and
@@ -135,14 +136,30 @@ impl Publisher {
         // Add a subscription for any REVOKE messages from the other publisher. If the
         // other provider revokes the namespace, we don't want to keep listening for
         // SUBSCRIBE messages to it.
-        let (_, futr) = other_clone.subscribe(
-            Message::Revoke(namespace_clone),
+        let (_, futr) = you_two.subscribe(
+            Message::Revoke(namespace_two),
             Subscriber::OnetimeTask(Some(Box::new(move |message| {
                 Box::new(me.unsubscribe(Message::Subscribe(message.unwrap_revoke()), uuid))
             }))),
         );
 
-        futs.join(futr).map(|_| ())
+        // Replay SUBSCRIBE messages received prior to this PROVIDE
+        let futp = self.inner.with(move |guard| {
+            let mut futs = Vec::new();
+            (*guard)
+                .subscribes
+                .iter()
+                .filter(|s| namespace_three.contains(s))
+                .for_each(|s| {
+                    debug!(target: "publisher", "Replay {:?} for new provide", s);
+                    futs.push(you_three.on_subscribe(s.clone(), me_three.clone()));
+                });
+            future::join_all(futs).map(|_| ())
+        });
+
+        futs.join(futr)
+            .join(futp.map_err(|e| ErrorKind::Msg(e.to_string()).into()))
+            .map(|_| ())
     }
 
     // Helper function for subscribing another publisher's consumer to our EVENT messages
