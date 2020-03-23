@@ -89,6 +89,11 @@ fn publish(sock_addr: SocketAddr, provides: Vec<String>) {
                 .expect("Could not send PROVIDE message")
         });
 
+        print!("\x1B[2J\x1B[H");
+        println!("Start typing to create an event, then press enter to send it to the broker.");
+        println!("Use the format: NAMESPACE=VALUE");
+        println!();
+
         // Send events
         let stdin = io::lines(BufReader::new(io::stdin()))
             .map_err(|e| ErrorKind::Msg(e.to_string()).into());

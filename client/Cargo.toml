@@ -14,4 +14,5 @@ log = "0.4"
 message = { version = "0.1", path = "../message" }
 pattern-matcher = { version = "0.1", path = "../pattern-matcher" }
 retain_mut = "0.1"
+termcolor = "1.1"
 tokio = "0.1"
