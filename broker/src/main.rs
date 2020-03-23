@@ -1,7 +1,7 @@
 #[allow(deprecated)]
 mod errors;
 
-use clap::{App, Arg};
+use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg};
 use env_logger;
 use errors::*;
 use futures::{future, future::Future, stream::Stream};
@@ -20,10 +20,10 @@ use std::net::SocketAddr;
 fn main() -> Result<()> {
     env_logger::init();
 
-    let matches = App::new("Server")
-        .version("1.0")
-        .author("Pete Hayes <pete@hayes.id.au>")
-        .about("Data server node")
+    let matches = App::new(crate_name!())
+        .version(crate_version!())
+        .author(crate_authors!())
+        .about(crate_description!())
         .arg(
             Arg::with_name("bind")
                 .short("a")
@@ -43,7 +43,7 @@ fn main() -> Result<()> {
                 .default_value("7101")
         ).get_matches();
 
-    // Bind the server's socket
+    // Bind the broker's socket
     // `value_of().unwrap()` is safe as a default value will always be available
     let port = matches.value_of("port").unwrap().trim();
     // `value_of().unwrap()` is safe as a default value will always be available

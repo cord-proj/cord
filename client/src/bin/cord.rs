@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     let addr = matches.value_of("address").unwrap().trim();
     let sock_addr = format!("{}:{}", addr, port)
         .parse()
-        .expect("Invalid server address");
+        .expect("Invalid broker address");
 
     if let Some(matches) = matches.subcommand_matches("pub") {
         let provides: Vec<&str> = matches.values_of("provide").unwrap().collect();

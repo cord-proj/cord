@@ -1,7 +1,12 @@
 [package]
-name = "server"
+name = "cord-broker"
 version = "0.1.0"
 authors = ["Pete Hayes <pete@hayes.id.au>"]
+license = "MPL-2.0"
+description = "Provides stream aggregation and sharing functionality for the Cord platform"
+repository = "https://github.com/petehayes102/cord"
+keywords = ["cord", "stream", "streaming"]
+categories = ["network-programming", "data-structures"]
 edition = "2018"
 
 [dependencies]

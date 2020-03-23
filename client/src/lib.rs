@@ -10,7 +10,7 @@ use tokio::{codec::Framed, net::TcpStream, prelude::Async, sync::mpsc, sync::one
 
 use std::{collections::HashMap, net::SocketAddr, ops::Drop, result, sync::Arc};
 
-/// A `Conn` is used to connect to and communicate with a server.
+/// A `Conn` is used to connect to and communicate with a broker.
 ///
 /// # Examples
 ///
@@ -20,7 +20,7 @@ use std::{collections::HashMap, net::SocketAddr, ops::Drop, result, sync::Arc};
 /// use tokio;
 ///
 /// let fut = Conn::new("127.0.0.1:7101".parse().unwrap()).and_then(|mut conn| {
-///     // Tell the server we're going to provide the namespace /users
+///     // Tell the broker we're going to provide the namespace /users
 ///     conn.provide("/users".into()).unwrap();
 ///
 ///     // Start publishing events...
@@ -68,7 +68,7 @@ struct Inner {
 }
 
 impl Conn {
-    /// Connect to a server
+    /// Connect to a broker
     pub fn new(addr: SocketAddr) -> impl Future<Item = Conn, Error = Error> {
         // Because Sink::send takes ownership of the sink and returns a future, we need a
         // different type to send data that doesn't require ownership. Channels are great
@@ -129,12 +129,12 @@ impl Conn {
             .map(|(_, sender)| Conn { sender, inner })
     }
 
-    /// Inform the server that you will be providing a new namespace
+    /// Inform the broker that you will be providing a new namespace
     pub fn provide(&mut self, namespace: Pattern) -> Result<()> {
         Ok(self.sender.try_send(Message::Provide(namespace))?)
     }
 
-    /// Inform the server that you will no longer be providing a namespace
+    /// Inform the broker that you will no longer be providing a namespace
     pub fn revoke(&mut self, namespace: Pattern) -> Result<()> {
         Ok(self.sender.try_send(Message::Revoke(namespace))?)
     }

@@ -8,14 +8,14 @@ use std::{
 };
 
 pub fn run_client<F: FnOnce(u16) + panic::UnwindSafe>(f: F) {
-    // Start a new server process
-    let (mut server, port) = start_server();
+    // Start a new broker process
+    let (mut broker, port) = start_broker();
 
-    // Catch panics to ensure that we have the opportunity to terminate the server
+    // Catch panics to ensure that we have the opportunity to terminate the broker
     let result = panic::catch_unwind(|| f(port));
 
-    // Terminate the server
-    server.kill().expect("Server was not running");
+    // Terminate the broker
+    broker.kill().expect("Broker was not running");
 
     // Now we can resume panicking if needed
     if let Err(e) = result {
@@ -23,7 +23,7 @@ pub fn run_client<F: FnOnce(u16) + panic::UnwindSafe>(f: F) {
     }
 }
 
-fn start_server() -> (Child, u16) {
+fn start_broker() -> (Child, u16) {
     let mut child = command().spawn().unwrap();
 
     // Get port number
@@ -43,12 +43,12 @@ fn command() -> Command {
     c
 }
 
-// Returns the path to the server executable
+// Returns the path to the broker executable
 fn bin() -> PathBuf {
     if cfg!(windows) {
-        root_dir().join("../server.exe")
+        root_dir().join("../cord-broker.exe")
     } else {
-        root_dir().join("../server")
+        root_dir().join("../cord-broker")
     }
 }
 

@@ -18,7 +18,7 @@ scenarios, you would implement the Client library independently.
 
 By default, the `--bind-address` is _127.0.0.1_, and the `--port` is _7101_.
 
-    $ ./server &
+    $ ./cord-broker &
 
 #### 2. Subscribe to an arbitrary namespace
 
@@ -44,6 +44,8 @@ example:
 
 Cord comprises a number of modules:
 
+-   **[Broker](broker/)** - the server binary that aggregates and distributes arbitrary
+    streams
 -   **[Client](client/)** - provides a library and CLI for interacting with Cord brokers
 -   **[Message](message/)** - provides the core `Message` enumerator and codec for
     sending `Message`s between brokers and clients
@@ -51,8 +53,6 @@ Cord comprises a number of modules:
     namespace patterns
 -   **[Pub/Sub](pubsub/)** - provides a `Publisher` and `Subscriber` to represent the
     stream and sink components of a client connection within a broker
--   **[Server](server/)** - the server binary that aggregates and distributes arbitrary
-    streams
 
 ## Etymology
 
