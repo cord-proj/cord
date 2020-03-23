@@ -100,7 +100,7 @@ fn publish(sock_addr: SocketAddr, provides: Vec<String>) {
                 conn.event(parts[0].into(), parts[1])
                     .expect("Could not send EVENT message");
             } else {
-                error!("Invalid event: {}", event);
+                error!("Events must be in format NAMESPACE=VALUE");
             }
 
             Ok(())
