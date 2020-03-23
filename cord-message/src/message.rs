@@ -1,4 +1,4 @@
-use pattern_matcher::Pattern;
+use cord_pattern::Pattern;
 
 use std::mem;
 

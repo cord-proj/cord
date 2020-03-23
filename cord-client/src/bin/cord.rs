@@ -1,5 +1,7 @@
-use clap::{App, AppSettings, Arg, SubCommand};
-use client::{errors::*, Conn};
+use clap::{
+    crate_authors, crate_description, crate_name, crate_version, App, AppSettings, Arg, SubCommand,
+};
+use cord_client::{errors::*, Conn};
 use env_logger;
 use futures::{future::join_all, Future, Stream};
 use log::error;
@@ -9,10 +11,10 @@ use tokio::io;
 fn main() -> Result<()> {
     env_logger::init();
 
-    let matches = App::new("Cord")
-        .version("1.0")
-        .author("Pete Hayes <pete@hayes.id.au>")
-        .about("CLI client")
+    let matches = App::new(crate_name!())
+        .version(crate_version!())
+        .author(crate_authors!())
+        .about(crate_description!())
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .arg(
             Arg::with_name("address")

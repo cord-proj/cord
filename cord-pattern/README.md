@@ -1,6 +1,6 @@
-# Pattern Matcher
+# Cord Pattern Module
 
-The pattern matcher provides a regex-like syntax for matching strings. It can also match
+The Pattern module provides a regex-like syntax for matching strings. It can also match
 other patterns, allowing users to test whether one pattern encapsulates another. This is
 useful for finding publishers that provide data matching a subscriber's namespace
 pattern.

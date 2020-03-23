@@ -1,11 +1,11 @@
 [package]
-name = "message"
+name = "cord-message"
 version = "0.1.0"
 authors = ["Pete Hayes <pete@hayes.id.au>"]
 edition = "2018"
 
 [dependencies]
 bytes = "0.4"
+cord-pattern = { version = "0.1", path = "../cord-pattern" }
 error-chain = "0.12"
-pattern-matcher = { version = "0.1", path = "../pattern-matcher" }
 tokio-codec = "0.1"

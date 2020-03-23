@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "broker",
-  "client",
-  "message",
-  "pattern-matcher",
-  "pubsub"
+  "cord-broker",
+  "cord-client",
+  "cord-message",
+  "cord-pattern",
+  "cord-pubsub"
 ]

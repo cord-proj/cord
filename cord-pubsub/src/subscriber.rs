@@ -1,7 +1,7 @@
 use crate::errors::Error;
+use cord_message::Message;
 use futures::{self, future, Future};
 use log::debug;
-use message::Message;
 use tokio::sync::mpsc::UnboundedSender;
 
 type SomeFuture = Box<dyn Future<Item = (), Error = Error> + Send>;

@@ -1,12 +1,12 @@
+use cord_message;
 use error_chain::*;
-use message;
 
 error_chain! {
     foreign_links {
         ChanRecv(::tokio::sync::mpsc::error::UnboundedRecvError);
-        ChanSend(::tokio::sync::mpsc::error::UnboundedTrySendError<message::Message>);
+        ChanSend(::tokio::sync::mpsc::error::UnboundedTrySendError<cord_message::Message>);
         Io(::std::io::Error);
-        Message(message::errors::Error);
+        Message(cord_message::errors::Error);
         TokioExec(::tokio::executor::SpawnError);
     }
 

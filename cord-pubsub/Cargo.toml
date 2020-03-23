@@ -1,16 +1,16 @@
 [package]
-name = "pubsub"
+name = "cord-pubsub"
 version = "0.1.0"
 authors = ["Pete Hayes <pete@hayes.id.au>"]
 edition = "2018"
 
 [dependencies]
+cord-message = { version = "0.1", path = "../cord-message" }
+cord-pattern = { version = "0.1", path = "../cord-pattern" }
 error-chain = "0.12"
 futures = "0.1"
 futures-locks = "0.3"
 log = "0.4"
-message = { version = "0.1", path = "../message" }
-pattern-matcher = { version = "0.1", path = "../pattern-matcher" }
 tokio = "0.1"
 uuid = { version = "0.7", features = ["v4"] }
 

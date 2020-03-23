@@ -1,4 +1,4 @@
-# Pub/Sub
+# Cord Pub/Sub Module
 
 Provides a publisher and subscriber to handle message routing.
 

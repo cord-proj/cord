@@ -1,8 +1,8 @@
 mod utils;
 
-use client::{Conn, Subscriber};
+use cord_client::{Conn, Subscriber};
+use cord_pattern::Pattern;
 use futures::{Future, Stream};
-use pattern_matcher::Pattern;
 use tokio::{sync::oneshot, timer::Delay};
 
 use std::{

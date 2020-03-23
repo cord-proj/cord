@@ -2,12 +2,12 @@
 mod errors;
 
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg};
+use cord_message::{Codec, Message};
+use cord_pubsub::{self, Publisher};
 use env_logger;
 use errors::*;
 use futures::{future, future::Future, stream::Stream};
 use log::error;
-use message::{Codec, Message};
-use pubsub::{self, Publisher};
 use tokio::{
     codec::Framed,
     net::{TcpListener, TcpStream},
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
                         // subscribers that match it, then pass each a copy via `recv()`.
                         tokio::spawn(future::join_all(futs).and_then(|_| {
                             stream
-                                .map_err(|e| pubsub::errors::ErrorKind::Message(e).into())
+                                .map_err(|e| cord_pubsub::errors::ErrorKind::Message(e).into())
                                 .for_each(move |message| handle.route(message))
                                 .map_err(|_| ())
                         }));

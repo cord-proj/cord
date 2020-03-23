@@ -1,0 +1,24 @@
+[package]
+name = "cord-broker"
+version = "0.1.0"
+authors = ["Pete Hayes <pete@hayes.id.au>"]
+license = "MPL-2.0"
+description = "Provides stream aggregation and sharing functionality for the Cord platform"
+repository = "https://github.com/petehayes102/cord"
+keywords = ["cord", "stream", "streaming"]
+categories = ["network-programming", "data-structures"]
+edition = "2018"
+
+[dependencies]
+clap = "2.33"
+cord-message = { version = "0.1", path = "../cord-message" }
+cord-pattern = { version = "0.1", path = "../cord-pattern" }
+cord-pubsub = { version = "0.1", path = "../cord-pubsub" }
+env_logger = "0.6"
+error-chain = "0.12"
+futures = "0.1"
+log = "0.4"
+tokio = "0.1"
+
+[dev-dependencies]
+cord-client = { path = "../cord-client" }

@@ -1,9 +1,9 @@
 use crate::{errors::*, subscriber::Subscriber};
+use cord_message::Message;
+use cord_pattern::Pattern;
 use futures::{self, future, Future};
 use futures_locks::Mutex;
 use log::debug;
-use message::Message;
-use pattern_matcher::Pattern;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 

@@ -5,9 +5,9 @@ streams. It uses a publish-subscribe model that allows multiple publishers to sh
 streams via a broker. Subscribers can then compose custom sinks using a regex-like
 pattern to access realtime data based on their individual requirements.
 
-Cord has a programmable interface in the form of the [Client library](client/), so it can
-be adapted to various use cases. As the library matures, this library will form the basis
-of a suite of adaptors for common technologies.
+Cord has a programmable interface in the form of the [cord-client library](cord-client/),
+so it can be adapted to various use cases. As the library matures, this library will form
+the basis of a suite of adaptors for common technologies.
 
 ## Usage
 
@@ -44,15 +44,16 @@ example:
 
 Cord comprises a number of modules:
 
--   **[Broker](broker/)** - the server binary that aggregates and distributes arbitrary
-    streams
--   **[Client](client/)** - provides a library and CLI for interacting with Cord brokers
--   **[Message](message/)** - provides the core `Message` enumerator and codec for
-    sending `Message`s between brokers and clients
--   **[Pattern Matcher](pattern-matcher/)** - provides the algorithm for comparing
-    namespace patterns
--   **[Pub/Sub](pubsub/)** - provides a `Publisher` and `Subscriber` to represent the
-    stream and sink components of a client connection within a broker
+-   **[cord-broker](cord-broker/)** - the server binary that aggregates and distributes
+    arbitrary streams
+-   **[cord-client](cord-client/)** - provides a library and CLI for interacting with
+    Cord brokers
+-   **[cord-message](cord-message/)** - provides the core `Message` enumerator and codec
+    for sending `Message`s between brokers and clients
+-   **[cord-pattern](cord-pattern/)** - provides the algorithm for comparing namespace
+    patterns
+-   **[cord-pubsub](cord-pubsub/)** - provides a `Publisher` and `Subscriber` to
+    represent the stream and sink components of a client connection within a broker
 
 ## Etymology
 

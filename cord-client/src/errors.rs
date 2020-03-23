@@ -1,5 +1,5 @@
+use cord_message::Message;
 use error_chain::*;
-use message::Message;
 use tokio::sync::mpsc::error::{
     RecvError, UnboundedRecvError, UnboundedSendError, UnboundedTrySendError,
 };
@@ -10,7 +10,7 @@ error_chain! {
         ConnSend(UnboundedTrySendError<Message>);
         ConnForward(UnboundedSendError);
         Io(::std::io::Error);
-        Message(message::errors::Error);
+        Message(cord_message::errors::Error);
         SubscriberError(RecvError);
         Terminate(::tokio::sync::oneshot::error::RecvError);
     }
