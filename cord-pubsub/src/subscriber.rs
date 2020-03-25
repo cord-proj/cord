@@ -11,8 +11,8 @@ pub enum Subscriber {
     // @todo Replace trait object with impl Trait once stabilised:
     // https://github.com/rust-lang/rust/issues/34511
     // Task(Box<FnMut(Message, PublisherHandle) -> impl Future<Item=(), Error=()>>)
-    Task(Box<FnMut(Message) -> SomeFuture + Send>),
-    OnetimeTask(Option<Box<FnOnce(Message) -> SomeFuture + Send>>),
+    Task(Box<dyn FnMut(Message) -> SomeFuture + Send>),
+    OnetimeTask(Option<Box<dyn FnOnce(Message) -> SomeFuture + Send>>),
 }
 
 impl Subscriber {
@@ -139,8 +139,8 @@ mod tests {
             Box::new(future::ok(()))
         }));
         RUNTIME.lock().unwrap().block_on(future::lazy(move || {
-            consumer.recv(message);
-            future::ok(())
+            let (_, fut) = consumer.recv(message);
+            fut.map_err(|_| ())
         }));
         assert_eq!(rx.try_recv().unwrap(), message_c);
 
@@ -160,8 +160,8 @@ mod tests {
             Box::new(future::ok(()))
         })));
         RUNTIME.lock().unwrap().block_on(future::lazy(move || {
-            consumer.recv(message);
-            future::ok(())
+            let (_, fut) = consumer.recv(message);
+            fut.map_err(|_| ())
         }));
         assert_eq!(rx.try_recv().unwrap(), message_c);
 
