@@ -524,11 +524,11 @@ mod tests {
         }));
 
         let m1 = Message::Subscribe("/a".into());
-        let subs = s1.try_lock().ok().unwrap();
+        let subs = s1.try_lock().unwrap();
         assert_eq!(subs.subscribers[&m1].len(), 1);
 
         let m2 = Message::Revoke("/a".into());
-        let subs = s2.try_lock().ok().unwrap();
+        let subs = s2.try_lock().unwrap();
         assert_eq!(subs.subscribers[&m2].len(), 1);
 
         RUNTIME.lock().unwrap().stop();
