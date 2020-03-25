@@ -1,6 +1,6 @@
 # Cord
 
-![](https://github.com/cord-proj/cord/workflows/CI/badge.svg)
+![CI](https://github.com/cord-proj/cord/workflows/CI/badge.svg)
 
 Cord is a data streaming platform for composing, aggregating and distributing arbitrary
 streams. It uses a publish-subscribe model that allows multiple publishers to share their
