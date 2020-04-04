@@ -2,5 +2,9 @@
 name = "cord"
 version = "0.0.1"
 authors = ["Placeholder crate, please do not install"]
-description = "This is a placeholder crate for the Cord Project. Please do not use this crate."
 license = "MPL-2.0"
+description = "This is a placeholder crate for the Cord Project. Please do not use this crate."
+homepage = "https://cord-proj.org"
+repository = "https://github.com/cord-proj/cord"
+readme = "CARGO_README.md"
+include = ["src/**/*"]
