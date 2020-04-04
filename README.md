@@ -11,6 +11,17 @@ To interact with the Broker, Cord provides the
 CLI. As the project matures, this library will form the basis of a suite of adaptors for
 common technologies.
 
+## Crates
+
+Cord comprises three crates:
+
+1.  **[Cord Broker](https://github.com/cord-proj/cord-broker)** - the server binary that
+    aggregates and distributes arbitrary streams
+2.  **[Cord Client](https://github.com/cord-proj/cord-client)** - provides a library and
+    CLI for interacting with Cord brokers
+3.  **[Cord Message](https://github.com/cord-proj/cord-message)** - an internal crate
+    that defines the message envelope and codec for transmitting messages over the wire
+
 ## Usage
 
 First, start a new [Cord Broker](https://github.com/cord-proj/cord-broker):
@@ -57,17 +68,6 @@ Publish to this namespace:
     Use the format: NAMESPACE=VALUE
 
     /names/first=Daz
-
-## Crates
-
-Cord comprises three crates:
-
-1.  **[Cord Broker](https://github.com/cord-proj/cord-broker)** - the server binary that
-    aggregates and distributes arbitrary streams
-2.  **[Cord Client](https://github.com/cord-proj/cord-client)** - provides a library and
-    CLI for interacting with Cord brokers
-3.  **[Cord Message](https://github.com/cord-proj/cord-message)** - an internal crate
-    that defines the message envelope and codec for transmitting messages over the wire
 
 ## Etymology
 
