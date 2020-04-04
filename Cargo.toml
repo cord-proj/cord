@@ -1,8 +1,6 @@
-[workspace]
-members = [
-  "cord-broker",
-  "cord-client",
-  "cord-message",
-  "cord-pattern",
-  "cord-pubsub"
-]
+[package]
+name = "cord"
+version = "0.0.1"
+authors = ["Placeholder crate, please do not install"]
+description = "This is a placeholder crate for the Cord Project. Please do not use this crate."
+license = "MPL-2.0"
